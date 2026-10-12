@@ -84,11 +84,11 @@ const Store = {
     catch { alert('保存失败：浏览器存储空间可能不足。衣物图片较多时请先在设置里导出备份。'); }
   },
   clothes: () => Store.get('clothes', []),
-  saveClothes(list) { Store.set('clothes', list); },
+  saveClothes(list) { Store.set('clothes', list); Store.set('dirty', true); },
   diary: () => Store.get('diary', []),
-  saveDiary(list) { Store.set('diary', list); },
+  saveDiary(list) { Store.set('diary', list); Store.set('dirty', true); },
   outfits: () => Store.get('outfits', []),
-  saveOutfits(list) { Store.set('outfits', list); },
+  saveOutfits(list) { Store.set('outfits', list); Store.set('dirty', true); },
   settings: () => Object.assign({
     city: { name: '武汉·华科', admin1: '湖北省', lat: 30.5113, lon: 114.4237 },
     favColors: [], avoidColors: [], favStyles: [],
@@ -1429,6 +1429,7 @@ async function ghApi(method, path, body, token, timeoutMs = 60000) {
   try {
     const res = await fetch(SYNC_API + path, {
       method, signal: ctrl.signal,
+      cache: 'no-store', // 避免 GET sha 被 HTTP 缓存导致 PUT 409
       headers: {
         Authorization: 'Bearer ' + token,
         Accept: 'application/vnd.github+json',
@@ -1441,8 +1442,9 @@ async function ghApi(method, path, body, token, timeoutMs = 60000) {
       const t = await res.text().catch(() => '');
       let msg = 'HTTP ' + res.status;
       if (res.status === 401) msg += '：Token 无效';
-      else if (res.status === 403) msg += '：Token 无仓库写入权限';
+      else if (res.status === 403) msg += '：Token 无仓库写入权限或触发限流';
       else if (res.status === 404) msg += '：文件不存在或仓库不对';
+      else if (res.status === 409) msg += '：文件版本冲突';
       throw new Error(msg + ' ' + t.slice(0, 100));
     }
     return res.status === 200 ? res.json() : null;
@@ -1456,20 +1458,33 @@ async function backupToCloud() {
   const json = JSON.stringify(payload);
   const sizeKB = Math.round(json.length / 1024);
 
-  // 拿已存在文件的 sha（更新需要）
-  let sha = null;
-  try {
-    const cur = await ghApi('GET', `/repos/${SYNC_REPO}/contents/${SYNC_FILE}?ref=main`, null, token, 20000);
-    if (cur && cur.sha) sha = cur.sha;
-  } catch (e) { /* 404 = 首次备份，无 sha */ }
+  // PUT（处理 CDN 陈旧导致的 409：重新拿 sha 重试，最多 3 次）
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    let sha = null;
+    try {
+      const cur = await ghApi('GET', `/repos/${SYNC_REPO}/contents/${SYNC_FILE}?ref=main`, null, token, 20000);
+      if (cur && cur.sha) sha = cur.sha;
+    } catch (e) { /* 404 = 首次备份，无 sha */ }
+    try {
+      await ghApi('PUT', `/repos/${SYNC_REPO}/contents/${SYNC_FILE}`, {
+        message: 'AI衣柜云端备份 · ' + new Date().toLocaleString('zh-CN'),
+        content: utf8ToB64(json),
+        branch: 'main',
+        sha: sha || undefined,
+      }, token);
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+      if (!String(e.message).includes('409')) throw e;
+      console.warn('备份版本冲突，2 秒后重试（CDN 同步延迟）...');
+      await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+  if (lastErr) throw lastErr;
 
-  await ghApi('PUT', `/repos/${SYNC_REPO}/contents/${SYNC_FILE}`, {
-    message: 'AI衣柜云端备份 · ' + new Date().toLocaleString('zh-CN'),
-    content: utf8ToB64(json),
-    branch: 'main',
-    sha: sha || undefined,
-  }, token);
-
+  Store.set('dirty', false); // 备份成功，清除脏标记
   Store.set('syncMeta', {
     lastSyncAt: payload.syncedAt,
     sizeKB, count: payload.clothes.length + payload.diary.length + payload.outfits.length,
@@ -1484,8 +1499,13 @@ async function restoreFromCloud() {
   if (!cur || !cur.content) throw new Error('云端还没有备份，请先「备份到云端」');
   const data = JSON.parse(b64ToUtf8(cur.content));
   if (data.app !== 'AI衣柜' || !Array.isArray(data.clothes)) throw new Error('云端数据格式不正确');
+  const stats = applyCloudPayload(data);
+  Store.set('dirty', false);
+  return Object.assign(stats, { syncedAt: data.syncedAt });
+}
 
-  // 恢复：衣物、日记（按 id 补图）、设置
+/* 把云端数据应用到本地（衣物/日记补图/固定搭配/设置），返回统计 */
+function applyCloudPayload(data) {
   const clothes = data.clothes || [];
   const idMap = {};
   clothes.forEach(c => { idMap[c.id] = c.image || ''; });
@@ -1497,14 +1517,103 @@ async function restoreFromCloud() {
   Store.saveClothes(clothes);
   Store.saveDiary(diary);
   Store.saveOutfits(data.outfits || []);
-  if (data.outfits) state.outfits = Store.outfits();
   if (data.settings) Store.saveSettings(Object.assign({}, data.settings, { city: data.settings.city || null }));
   state.clothes = Store.clothes();
   state.diary = Store.diary();
   state.outfits = Store.outfits();
   state.settings = Store.settings();
+  const meta = getSyncMeta();
+  Store.set('syncMeta', Object.assign({}, meta, { lastSyncAt: data.syncedAt }));
   renderAll();
-  return { count: clothes.length, diaryCount: diary.length, outfitCount: (data.outfits || []).length, syncedAt: data.syncedAt };
+  renderTodayWorn();
+  return { count: clothes.length, diaryCount: diary.length, outfitCount: (data.outfits || []).length };
+}
+
+/* 公开拉取云端数据（无需 Token，公开仓库可直接读；no-store 保证最新） */
+async function fetchCloudDataPublic() {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 12000);
+  try {
+    // 走 api.github.com（国内可用，参考 AP 店铺经验；不用会缓存陈旧数据的 CDN）
+    const res = await fetch(`https://api.github.com/repos/${SYNC_REPO}/contents/${SYNC_FILE}?ref=main`, {
+      headers: { Accept: 'application/vnd.github+json' }, signal: ctrl.signal,
+      cache: 'no-store', // 关键：绕过 HTTP 缓存，保证拿到最新备份
+    });
+    if (!res.ok) return null; // 限流/无数据：静默降级，不影响本地使用
+    const json = await res.json();
+    if (!json || !json.content) return null;
+    const data = JSON.parse(b64ToUtf8(json.content));
+    if (data.app !== 'AI衣柜' || !Array.isArray(data.clothes)) return null;
+    return data;
+  } catch { return null; }
+  finally { clearTimeout(timer); }
+}
+
+/* 打开页面时检查云端更新：
+ * - 本地为空 + 云端有数据 → 自动载入（访客/新设备，打开就是最新的）
+ * - 本地有数据 + 云端更新 → 首页提示条，一键载入
+ */
+async function checkCloudUpdate() {
+  const data = await fetchCloudDataPublic();
+  if (!data) return; // 无云端数据或网络失败：静默，不影响本地使用
+  const localEmpty = state.clothes.length === 0 && state.diary.length === 0;
+  const meta = getSyncMeta();
+  const cloudNewer = !meta.lastSyncAt || (data.syncedAt && data.syncedAt > meta.lastSyncAt);
+
+  if (localEmpty) {
+    // 访客或新设备：自动载入云端衣柜
+    const stats = applyCloudPayload(data);
+    renderCloudBar('loaded', `☁ 已载入共享衣柜：${stats.count} 件衣物 · ${stats.outfitCount} 套搭配（备份于 ${new Date(data.syncedAt).toLocaleString('zh-CN')}）`);
+    toast('已同步云端衣柜 ✓');
+    return;
+  }
+  if (cloudNewer) {
+    // 本地有数据但云端更新：提示载入
+    renderCloudBar('update', `☁ 云端衣柜有更新（${new Date(data.syncedAt).toLocaleString('zh-CN')}）`, () => {
+      applyCloudPayload(data);
+      Store.set('dirty', false);
+      renderCloudBar('loaded', '☁ 已更新到云端最新版本 ✓');
+      toast('已载入云端最新衣柜 ✓');
+    });
+  }
+}
+
+/* 有 Token 且数据有变动 → 打开页面时自动静默备份（别人打开永远是最新） */
+async function autoBackupIfNeeded() {
+  const token = getSyncToken();
+  if (!token) return;
+  if (!Store.get('dirty', false)) return;
+  try {
+    await backupToCloud();
+    Store.set('dirty', false);
+    renderSyncStatus('ok', '✓ 已自动备份最新数据到云端');
+    console.log('自动备份完成');
+  } catch (e) {
+    console.warn('自动备份失败（下次打开重试）:', e.message);
+  }
+}
+
+/* 首页云端提示条 */
+function renderCloudBar(type, text, onClick) {
+  let bar = $('#cloudBar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'cloudBar';
+    bar.className = 'cloud-bar';
+    const ref = $('#daySwitch');
+    ref.parentNode.insertBefore(bar, ref.nextSibling);
+  }
+  bar.style.display = 'block';
+  bar.className = 'cloud-bar ' + type;
+  if (onClick) {
+    bar.innerHTML = `${esc(text)} <button class="cloud-load-btn">载入</button>`;
+    bar.querySelector('.cloud-load-btn').onclick = onClick;
+  } else {
+    bar.textContent = text;
+    // 20 秒后自动收起
+    clearTimeout(bar._timer);
+    bar._timer = setTimeout(() => { bar.style.display = 'none'; }, 20000);
+  }
 }
 
 function renderSyncStatus(cls, text) {
@@ -2003,6 +2112,9 @@ function init() {
   updateDayUI();
   renderTodayWorn();
   loadWeather();
+  // 云端同步：检查更新（访客自动载入）+ 主人有变动时自动备份
+  checkCloudUpdate();
+  autoBackupIfNeeded();
 }
 
 document.addEventListener('DOMContentLoaded', init);
