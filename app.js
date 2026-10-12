@@ -88,7 +88,7 @@ const Store = {
   diary: () => Store.get('diary', []),
   saveDiary(list) { Store.set('diary', list); },
   settings: () => Object.assign({
-    city: { name: '上海', admin1: '上海市', lat: 31.2304, lon: 121.4737 },
+    city: { name: '武汉·华科', admin1: '湖北省', lat: 30.5113, lon: 114.4237 },
     favColors: [], avoidColors: [], favStyles: [],
   }, Store.get('settings', {})),
   saveSettings(s) { Store.set('settings', s); },
@@ -371,29 +371,71 @@ async function aiRemoveBackground(dataUrl) {
   let mn = Infinity, mx = -Infinity;
   for (let i = 0; i < d.length; i++) { if (d[i] < mn) mn = d[i]; if (d[i] > mx) mx = d[i]; }
   const range = (mx - mn) || 1;
+  const v = new Uint8ClampedArray(S * S);
+  for (let i = 0; i < S * S; i++) v[i] = ((d[i] - mn) / range) * 255;
 
-  const cm = document.createElement('canvas');
-  cm.width = S; cm.height = S;
-  const ctxm = cm.getContext('2d');
-  const md = ctxm.createImageData(S, S);
-  for (let i = 0; i < S * S; i++) {
-    const v = ((d[i] - mn) / range) * 255;
-    md.data[i * 4] = 255; md.data[i * 4 + 1] = 255;
-    md.data[i * 4 + 2] = 255; md.data[i * 4 + 3] = v;
+  /* ---- 连通域分析：一图多件自动分开 ----
+   * 二值化 alpha>=60，BFS 标记连通域；
+   * 面积 >= 3%（约一件衣服最小占比）算有效件，最多 4 件。 */
+  const labels = new Int32Array(S * S); // 0=背景, >0=件id
+  const comps = []; // { id, area }
+  const stack = [];
+  for (let p = 0; p < S * S; p++) {
+    if (v[p] < 60 || labels[p]) continue;
+    const id = comps.length + 1;
+    let area = 0;
+    stack.length = 0; stack.push(p);
+    while (stack.length) {
+      const q = stack.pop();
+      if (q < 0 || q >= S * S) continue;
+      if (labels[q] || v[q] < 60) continue;
+      // 4 邻域（q = y*S+x）
+      const x = q % S, y = (q - x) / S;
+      labels[q] = id; area++;
+      if (x > 0) stack.push(q - 1);
+      if (x < S - 1) stack.push(q + 1);
+      if (y > 0) stack.push(q - S);
+      if (y < S - 1) stack.push(q + S);
+    }
+    comps.push({ id, area });
   }
-  ctxm.putImageData(md, 0, 0);
+  const MIN_AREA = S * S * 0.03;
+  const valid = comps.filter(c => c.area >= MIN_AREA)
+    .sort((a, b) => b.area - a.area).slice(0, 4);
 
-  const c2 = document.createElement('canvas');
-  c2.width = img.width; c2.height = img.height;
-  const ctx2 = c2.getContext('2d');
-  ctx2.drawImage(img, 0, 0);
-  ctx2.globalCompositeOperation = 'destination-in';
-  ctx2.imageSmoothingEnabled = true;
-  ctx2.imageSmoothingQuality = 'high';
-  ctx2.drawImage(cm, 0, 0, img.width, img.height);
-  ctx2.globalCompositeOperation = 'source-over';
+  // 合成某一件（或全部）的抠图
+  const composePiece = (keepId) => {
+    const cm = document.createElement('canvas');
+    cm.width = S; cm.height = S;
+    const ctxm = cm.getContext('2d');
+    const md = ctxm.createImageData(S, S);
+    for (let i = 0; i < S * S; i++) {
+      const on = keepId === 0 ? true : (labels[i] === keepId);
+      md.data[i * 4] = 255; md.data[i * 4 + 1] = 255;
+      md.data[i * 4 + 2] = 255; md.data[i * 4 + 3] = on ? v[i] : 0;
+    }
+    ctxm.putImageData(md, 0, 0);
 
-  return trimTransparent(c2, 480);
+    const c2 = document.createElement('canvas');
+    c2.width = img.width; c2.height = img.height;
+    const ctx2 = c2.getContext('2d');
+    ctx2.drawImage(img, 0, 0);
+    ctx2.globalCompositeOperation = 'destination-in';
+    ctx2.imageSmoothingEnabled = true;
+    ctx2.imageSmoothingQuality = 'high';
+    ctx2.drawImage(cm, 0, 0, img.width, img.height);
+    ctx2.globalCompositeOperation = 'source-over';
+    return trimTransparent(c2, 480);
+  };
+
+  if (valid.length > 1) {
+    // 多件：逐件合成
+    const pieces = valid.map(c => composePiece(c.id));
+    // 过滤裁剪后无效的极小件
+    const ok = pieces.filter(p => p && p.length > 2000);
+    return { pieces: ok.length > 1 ? ok : [composePiece(0)], multiple: ok.length > 1 };
+  }
+  return { pieces: [composePiece(0)], multiple: false };
 }
 
 /* ---------- 2. 快速抠图兜底：纯色背景移除（无网络、无模型，秒级） ---------- */
@@ -867,6 +909,48 @@ function renderWardrobe() {
 /* ================= 弹窗：添加/编辑衣物 ================= */
 let editingId = null;
 let pendingImage = null;
+/* 多件识别队列：一张照片拆出的多件衣物，逐件填写保存 */
+let uploadQueue = [];   // [{ image, cls, color }]
+let queueIndex = 0;
+
+/* 把识别结果预填到表单（cls/color 可为 null） */
+function applyRecognition(cls, color) {
+  if (cls) {
+    setChips($('#catChips'), null, false, [cls.cat]);
+    setChips($('#thickChips'), null, false, [String(cls.thick)]);
+    setChips($('#seasonChips'), null, true, cls.seasons);
+  }
+  if (color) setChips($('#colorChips'), null, false, [color]);
+}
+
+/* 依据识别结果生成默认名称（如「黑 卫衣」），用户可改 */
+function suggestName(cls, color) {
+  const zh = cls ? (cls.zh || CAT_NAMES[cls.cat]) : '';
+  return (color || '') + (zh ? ' ' + zh : '');
+}
+
+/* 显示队列中的第 i 件 */
+function showQueueItem(i) {
+  const it = uploadQueue[i];
+  if (!it) return;
+  queueIndex = i;
+  editingId = null;
+  pendingImage = it.image;
+  renderPhotoPreview(pendingImage);
+  applyRecognition(it.cls, it.color);
+  $('#clothName').value = suggestName(it.cls, it.color);
+
+  const st = $('#cutStatus');
+  const parts = [];
+  if (it.cls) { parts.push(it.cls.zh || CAT_NAMES[it.cls.cat]); parts.push(THICK_NAMES[it.cls.thick]); }
+  if (it.color) parts.push(it.color);
+  st.textContent = `第 ${i + 1}/${uploadQueue.length} 件 · ${(parts.join(' · ') || '未识别')}（可调整）`;
+  st.className = 'cut-status ok';
+  $('#btnRetryAI').style.display = 'none';
+  const del = $('#btnDeleteCloth');
+  del.style.display = 'inline-block';
+  del.textContent = '跳过此件';
+}
 
 function setChips(container, selected, multi, preselect) {
   const chps = container.querySelectorAll('.chip');
@@ -900,7 +984,9 @@ function openClothModal(item) {
   editingId = item ? item.id : null;
   pendingImage = item ? item.image : null;
   $('#clothModalTitle').textContent = item ? '编辑衣物' : '添加衣物';
+  uploadQueue = []; queueIndex = 0; // 重置多件队列
   $('#btnDeleteCloth').style.display = item ? 'block' : 'none';
+  $('#btnDeleteCloth').textContent = '删除';
   $('#clothName').value = item ? item.name : '';
   renderPhotoPreview(pendingImage);
   const st = $('#cutStatus');
@@ -1136,36 +1222,56 @@ function init() {
       pendingImage = origin;
       renderPhotoPreview(pendingImage);
 
-      // 2. AI 抠图（u2netp，带超时；失败 → 纯色背景移除兜底）
+      // 2. AI 抠图（u2netp，自动分件；失败 → 纯色背景移除兜底）
       st.textContent = '';
       showIndeterminate('AI 正在识别衣物并抠图…');
       st.className = 'cut-status busy';
-      let cut = null, cutMode = 'ai';
+      let pieces = null, multiple = false, cutMode = 'ai';
       try {
-        cut = await aiRemoveBackground(origin);
+        const r = await aiRemoveBackground(origin);
+        pieces = r.pieces; multiple = r.multiple;
       } catch (err) {
         console.warn('AI 抠图失败，走快速兜底:', err.message);
-        cut = null;
+        pieces = null;
       }
       hideProgress();
 
-      if (!cut) {
+      if (!pieces) {
         st.textContent = 'AI 模型加载失败，尝试快速抠图…';
         try {
-          cut = await fastRemoveBg(origin);
+          const cut = await fastRemoveBg(origin);
+          pieces = [cut];
           cutMode = 'fast';
-        } catch { cut = origin; cutMode = 'none'; }
+        } catch { pieces = [origin]; cutMode = 'none'; }
       }
-      pendingImage = cut;
+      uploadQueue = []; queueIndex = 0;
+
+      if (multiple && pieces.length > 1) {
+        // 3a. 多件：逐件识别（品类/颜色），入队
+        for (let i = 0; i < pieces.length; i++) {
+          showIndeterminate(`正在识别第 ${i + 1}/${pieces.length} 件（品类/颜色）…`);
+          const cls = await classifyCloth(pieces[i]).catch(() => null);
+          const color = await guessColor(pieces[i]).catch(() => '');
+          uploadQueue.push({ image: pieces[i], cls, color });
+        }
+        hideProgress();
+        setAIProgress(null);
+        showQueueItem(0);
+        toast(`识别到 ${uploadQueue.length} 件衣物，逐件确认保存`);
+        return;
+      }
+
+      // 3b. 单件：现有流程
+      pendingImage = pieces[0];
       renderPhotoPreview(pendingImage);
 
-      // 3. 识别衣物属性（品类/厚薄/季节）
+      // 识别衣物属性（品类/厚薄/季节）
       st.textContent = '正在识别衣物类型…';
       st.className = 'cut-status busy';
       showIndeterminate('正在识别衣物类型（品类/厚薄/季节）…');
       let cls = null;
       if (cutMode !== 'none') {
-        cls = await classifyCloth(cut).catch(err => { console.warn('分类失败:', err.message); return null; });
+        cls = await classifyCloth(pendingImage).catch(err => { console.warn('分类失败:', err.message); return null; });
       }
       hideProgress();
 
@@ -1174,19 +1280,16 @@ function init() {
 
       // 5. 预填识别结果（用户可再调整）
       const parts = [];
+      applyRecognition(cls, guessed);
       if (cls) {
-        setChips($('#catChips'), null, false, [cls.cat]);
-        setChips($('#thickChips'), null, false, [String(cls.thick)]);
-        setChips($('#seasonChips'), null, true, cls.seasons);
         parts.push(cls.zh || CAT_NAMES[cls.cat]);
         parts.push(THICK_NAMES[cls.thick]);
       } else {
         parts.push('类别未识别');
       }
-      if (guessed) {
-        setChips($('#colorChips'), null, false, [guessed]);
-        parts.push(guessed);
-      }
+      if (guessed) parts.push(guessed);
+      const autoName = suggestName(cls, guessed);
+      if (autoName && !$('#clothName').value.trim()) $('#clothName').value = autoName;
 
       // 6. 状态汇总
       hideProgress();
@@ -1243,7 +1346,7 @@ function init() {
     });
   });
 
-  // 保存衣物
+  // 保存衣物（多件队列：保存后自动切下一件）
   $('#btnSaveCloth').onclick = () => {
     const name = $('#clothName').value.trim();
     if (!name) { toast('给衣物起个名字吧'); return; }
@@ -1270,13 +1373,37 @@ function init() {
     }
     Store.saveClothes(list);
     state.clothes = list;
-    $('#clothModal').classList.remove('open');
     renderWardrobe();
+
+    // 多件队列：还有下一件 → 切换；全部完成 → 关闭
+    if (!editingId && uploadQueue.length) {
+      if (queueIndex < uploadQueue.length - 1) {
+        showQueueItem(queueIndex + 1);
+        toast(`已保存 ✓ 还剩 ${uploadQueue.length - queueIndex - 1} 件待确认`);
+        return;
+      }
+      uploadQueue = []; queueIndex = 0;
+      $('#clothModal').classList.remove('open');
+      toast('一套全部录入完成 🎉');
+      return;
+    }
+    $('#clothModal').classList.remove('open');
     toast(editingId ? '已保存 ✓' : '已加入衣柜 🎉');
   };
 
-  // 删除衣物
+  // 删除衣物（多件队列模式下 = 跳过此件）
   $('#btnDeleteCloth').onclick = () => {
+    if (!editingId && uploadQueue.length) {
+      if (queueIndex < uploadQueue.length - 1) {
+        showQueueItem(queueIndex + 1);
+        toast(`已跳过，还剩 ${uploadQueue.length - queueIndex - 1} 件`);
+      } else {
+        uploadQueue = []; queueIndex = 0;
+        $('#clothModal').classList.remove('open');
+        toast('已跳过最后一件');
+      }
+      return;
+    }
     if (!confirm('确定删除这件衣物吗？')) return;
     state.clothes = state.clothes.filter(c => c.id !== editingId);
     Store.saveClothes(state.clothes);
