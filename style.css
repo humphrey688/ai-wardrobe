@@ -316,10 +316,14 @@ body{
   repeating-conic-gradient(#f2f3f6 0% 25%, #fff 0% 50%) 0 0/24px 24px}
 .photo-placeholder{text-align:center;color:var(--text-2);font-size:30px}
 .photo-placeholder span{display:block;font-size:13px;color:var(--text-3);margin-top:6px;font-weight:500}
-.cut-status{font-size:12px;color:var(--text-2);text-align:center;margin-top:6px;min-height:16px;transition:.2s}
+.cut-status{font-size:12px;color:var(--text-2);text-align:center;margin-top:6px;min-height:16px;transition:.2s;line-height:1.6}
 .cut-status.busy{color:var(--primary);font-weight:600}
 .cut-status.ok{color:var(--primary)}
 .cut-status.err{color:var(--danger)}
+.retry-btn{
+  display:block;margin:6px auto 0;background:none;border:1px dashed var(--primary);
+  color:var(--primary);border-radius:999px;padding:5px 14px;font-size:12px;cursor:pointer;
+}
 
 /* 加载动画 */
 .loading-dots{display:flex;justify-content:center;gap:6px;padding:20px}

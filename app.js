@@ -221,33 +221,73 @@ function loadImageEl(src) {
   });
 }
 
-/* ================= AI 抠图（onnxruntime-web + u2netp） =================
- * 模型 u2netp.onnx 4.4MB（rembg 同款轻量版），浏览器内推理，无需服务器。
- * 首次使用按需加载 ~15MB（运行时+模型），之后浏览器缓存。
- */
-let _ort = null;
-let _bgSession = null;
-
-async function ensureBgSession() {
-  if (_bgSession) return _bgSession;
-  if (!_ort) {
-    // wasm 运行时会自动以 ort.min.mjs 所在目录为基准加载同目录的 .mjs/.wasm
-    _ort = await import('./libs/ort/ort.min.mjs');
-    _ort.env.wasm.numThreads = 1; // GitHub Pages 无 COOP/COEP，用单线程稳妥
-  }
-  _bgSession = await _ort.InferenceSession.create('./libs/u2netp.onnx', {
-    executionProviders: ['wasm'],
-  });
-  return _bgSession;
+function dataUrlToFile(dataUrl) {
+  try {
+    const [meta, b64] = dataUrl.split(',');
+    const mime = (meta.match(/data:(.*?);/) || [])[1] || 'image/jpeg';
+    const bin = atob(b64);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    return new File([buf], 'retry.jpg', { type: mime });
+  } catch { return null; }
 }
 
-/* u2netp 输入 320x320，ImageNet 归一化；输出为前景概率 mask */
+/* ================= AI 推理（onnxruntime-web + u2netp 抠图 + mobilenet 分类） =================
+ * 抠图模型 u2netp.onnx 4.4MB（rembg 同款轻量版），分类模型 mobilenetv2.onnx 13.3MB。
+ * 全部浏览器内推理，无需服务器。首次使用需下载约 28MB（含运行时），之后浏览器缓存。
+ * 所有环节带超时与降级，失败不阻塞保存。
+ */
+let _ortPromise = null;
+let _ortRetry = 0;
+
+function ensureOrt() {
+  if (!_ortPromise) {
+    // 重试时换 URL 绕过浏览器对失败 ES Module 的缓存
+    const suffix = _ortRetry > 0 ? `?r=${_ortRetry}` : '';
+    _ortPromise = import('./libs/ort/ort.min.mjs' + suffix).then(ort => {
+      ort.env.wasm.numThreads = 1; // GitHub Pages 无 COOP/COEP，单线程稳妥
+      return ort;
+    });
+    // 失败时清缓存，允许下次重试
+    _ortPromise.catch(() => { _ortPromise = null; _ortRetry++; });
+  }
+  return _ortPromise;
+}
+
+const _sessions = {};
+
+function ensureSession(modelPath) {
+  if (!_sessions[modelPath]) {
+    _sessions[modelPath] = (async () => {
+      const ort = await ensureOrt();
+      return ort.InferenceSession.create(modelPath, { executionProviders: ['wasm'] });
+    })();
+    // 失败时清缓存并重置 ort（wasm 初始化失败后内部状态无法恢复，需新实例），允许下次重试
+    _sessions[modelPath].catch(() => {
+      delete _sessions[modelPath];
+      _ortPromise = null;
+      _ortRetry++;
+    });
+  }
+  return _sessions[modelPath];
+}
+
+function withTimeout(promise, ms, msg) {
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(msg || '超时')), ms)),
+  ]);
+}
+
+/* ---------- 1. AI 抠图（u2netp）---------- */
 async function aiRemoveBackground(dataUrl) {
-  const session = await ensureBgSession();
+  const [session, ort] = await Promise.all([
+    withTimeout(ensureSession('./libs/u2netp.onnx'), 90000, 'AI 模型加载超时'),
+    ensureOrt(),
+  ]);
   const S = 320;
   const img = await loadImageEl(dataUrl);
 
-  // 预处理 → NCHW float32
   const c1 = document.createElement('canvas');
   c1.width = S; c1.height = S;
   const ctx1 = c1.getContext('2d', { willReadFrequently: true });
@@ -259,10 +299,12 @@ async function aiRemoveBackground(dataUrl) {
     input[S * S + i] = (px[i * 4 + 1] / 255 - 0.456) / 0.224;
     input[2 * S * S + i] = (px[i * 4 + 2] / 255 - 0.406) / 0.225;
   }
-  const tensor = new _ort.Tensor('float32', input, [1, 3, S, S]);
-  const results = await session.run({ [session.inputNames[0]]: tensor });
+  const tensor = new ort.Tensor('float32', input, [1, 3, S, S]);
+  const results = await withTimeout(
+    session.run({ [session.inputNames[0]]: tensor }),
+    60000, 'AI 识别超时'
+  );
 
-  // 取输出 mask（u2netp 输出 d0），min-max 归一化到 0-255
   const out = results[session.outputNames[0]];
   const d = out.data;
   let mn = Infinity, mx = -Infinity;
@@ -280,7 +322,6 @@ async function aiRemoveBackground(dataUrl) {
   }
   ctxm.putImageData(md, 0, 0);
 
-  // 用 mask 作为 alpha 通道合成原图（平滑放大）
   const c2 = document.createElement('canvas');
   c2.width = img.width; c2.height = img.height;
   const ctx2 = c2.getContext('2d');
@@ -292,6 +333,145 @@ async function aiRemoveBackground(dataUrl) {
   ctx2.globalCompositeOperation = 'source-over';
 
   return trimTransparent(c2, 480);
+}
+
+/* ---------- 2. 快速抠图兜底：纯色背景移除（无网络、无模型，秒级） ---------- */
+async function fastRemoveBg(dataUrl) {
+  const img = await loadImageEl(dataUrl);
+  const W = img.width, H = img.height;
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0);
+  const imgData = ctx.getImageData(0, 0, W, H);
+  const px = imgData.data;
+
+  // 采样四角（各 12x12）估计背景色；四角差异大则背景杂乱，容差放大
+  const corner = (x0, y0) => {
+    let r = 0, g = 0, b = 0, n = 0;
+    for (let y = y0; y < y0 + 12 && y < H; y++)
+      for (let x = x0; x < x0 + 12 && x < W; x++) {
+        const i = (y * W + x) * 4;
+        r += px[i]; g += px[i + 1]; b += px[i + 2]; n++;
+      }
+    return [r / n, g / n, b / n];
+  };
+  const corners = [corner(0, 0), corner(W - 12, 0), corner(0, H - 12), corner(W - 12, H - 12)];
+  const bg = corners[0].map((_, k) => corners.reduce((s, cc) => s + cc[k], 0) / 4);
+  const spread = Math.max(...corners.map(cc => Math.hypot(cc[0] - bg[0], cc[1] - bg[1], cc[2] - bg[2])));
+  const tol = Math.min(90, 34 + spread);
+
+  // 从边缘 floodfill：与背景色接近的连通区域 → 透明
+  const visited = new Uint8Array(W * H);
+  const stack = [];
+  for (let x = 0; x < W; x++) { stack.push(x, 0, x, H - 1); }
+  for (let y = 0; y < H; y++) { stack.push(0, y, W - 1, y); }
+  while (stack.length) {
+    const y = stack.pop(); const x = stack.pop();
+    if (x < 0 || y < 0 || x >= W || y >= H) continue;
+    const p = y * W + x;
+    if (visited[p]) continue;
+    visited[p] = 1;
+    const i = p * 4;
+    if (Math.hypot(px[i] - bg[0], px[i + 1] - bg[1], px[i + 2] - bg[2]) < tol) {
+      px[i + 3] = 0;
+      stack.push(x - 1, y, x + 1, y, x, y - 1, x, y + 1);
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return trimTransparent(c, 480);
+}
+
+/* ---------- 3. 自动识别衣物属性（mobilenetv2 + ImageNet 类映射） ---------- */
+const CLOTHES_MAP = {
+  399: { cat: 'outer', thick: 2, seasons: ['秋', '冬'], zh: '罩袍' },
+  400: { cat: 'outer', thick: 2, seasons: ['秋', '冬'], zh: '长袍' },
+  433: { cat: 'accessory', thick: 1, seasons: ['夏'], zh: '泳帽' },
+  445: { cat: 'bottom', thick: 1, seasons: ['夏'], zh: '泳衣' },
+  474: { cat: 'outer', thick: 2, seasons: ['春', '秋'], zh: '开衫' },
+  502: { cat: 'shoes', thick: 2, seasons: ['春', '夏', '秋'], zh: '木屐鞋' },
+  514: { cat: 'shoes', thick: 3, seasons: ['秋', '冬'], zh: '短靴' },
+  515: { cat: 'accessory', thick: 1, seasons: ['春', '夏', '秋'], zh: '帽子' },
+  568: { cat: 'outer', thick: 3, seasons: ['冬'], zh: '皮草大衣' },
+  578: { cat: 'bottom', thick: 2, seasons: ['春', '夏', '秋'], zh: '长裙' },
+  601: { cat: 'bottom', thick: 2, seasons: ['春', '夏'], zh: '蓬蓬裙' },
+  608: { cat: 'bottom', thick: 2, seasons: ['春', '秋', '冬'], zh: '牛仔裤' },
+  610: { cat: 'top', thick: 1, seasons: ['春', '夏'], zh: 'T恤' },
+  614: { cat: 'outer', thick: 2, seasons: ['春', '秋'], zh: '和风外套' },
+  617: { cat: 'outer', thick: 2, seasons: ['春', '秋'], zh: '长外套' },
+  630: { cat: 'shoes', thick: 2, seasons: ['春', '夏', '秋'], zh: '乐福鞋' },
+  638: { cat: 'top', thick: 1, seasons: ['夏'], zh: '泳装上衣' },
+  639: { cat: 'top', thick: 1, seasons: ['夏'], zh: '连体泳衣' },
+  652: { cat: 'outer', thick: 3, seasons: ['秋', '冬'], zh: '制服外套' },
+  655: { cat: 'bottom', thick: 1, seasons: ['夏'], zh: '短裙' },
+  658: { cat: 'accessory', thick: 3, seasons: ['冬'], zh: '手套' },
+  679: { cat: 'accessory', thick: 1, seasons: ['春', '夏', '秋', '冬'], zh: '项链' },
+  689: { cat: 'bottom', thick: 2, seasons: ['春', '夏'], zh: '半裙' },
+  697: { cat: 'top', thick: 2, seasons: ['春', '秋', '冬'], zh: '睡衣' },
+  735: { cat: 'outer', thick: 2, seasons: ['秋', '冬'], zh: '披风' },
+  770: { cat: 'shoes', thick: 1, seasons: ['春', '夏', '秋'], zh: '运动鞋' },
+  774: { cat: 'shoes', thick: 1, seasons: ['夏'], zh: '凉鞋' },
+  775: { cat: 'bottom', thick: 1, seasons: ['夏'], zh: '沙龙裙' },
+  806: { cat: 'accessory', thick: 1, seasons: ['春', '夏', '秋', '冬'], zh: '袜子' },
+  808: { cat: 'accessory', thick: 1, seasons: ['春', '夏', '秋'], zh: '宽檐帽' },
+  834: { cat: 'outer', thick: 2, seasons: ['春', '秋', '冬'], zh: '西装' },
+  836: { cat: 'accessory', thick: 1, seasons: ['春', '夏', '秋'], zh: '墨镜' },
+  837: { cat: 'accessory', thick: 1, seasons: ['春', '夏', '秋'], zh: '墨镜' },
+  841: { cat: 'top', thick: 2, seasons: ['秋', '冬'], zh: '卫衣' },
+  842: { cat: 'bottom', thick: 1, seasons: ['夏'], zh: '泳裤' },
+  869: { cat: 'outer', thick: 2, seasons: ['秋', '冬'], zh: '风衣' },
+};
+
+const THICK_NAMES = { 1: '轻薄', 2: '适中', 3: '厚重' };
+
+/* 返回 { cat, thick, seasons, label, prob } 或 null */
+async function classifyCloth(dataUrl) {
+  const [session, ort] = await Promise.all([
+    withTimeout(ensureSession('./libs/mobilenetv2.onnx'), 90000, '识别模型加载超时'),
+    ensureOrt(),
+  ]);
+  const S = 224;
+  const img = await loadImageEl(dataUrl);
+
+  // 贴白底 + letterbox 到 224x224
+  const c1 = document.createElement('canvas');
+  c1.width = S; c1.height = S;
+  const ctx1 = c1.getContext('2d', { willReadFrequently: true });
+  ctx1.fillStyle = '#fff';
+  ctx1.fillRect(0, 0, S, S);
+  const scale = Math.min(S / img.width, S / img.height);
+  const dw = img.width * scale, dh = img.height * scale;
+  ctx1.drawImage(img, (S - dw) / 2, (S - dh) / 2, dw, dh);
+  const px = ctx1.getImageData(0, 0, S, S).data;
+
+  const input = new Float32Array(3 * S * S);
+  for (let i = 0; i < S * S; i++) {
+    input[i] = (px[i * 4] / 255 - 0.485) / 0.229;
+    input[S * S + i] = (px[i * 4 + 1] / 255 - 0.456) / 0.224;
+    input[2 * S * S + i] = (px[i * 4 + 2] / 255 - 0.406) / 0.225;
+  }
+  const tensor = new ort.Tensor('float32', input, [1, 3, S, S]);
+  const results = await withTimeout(
+    session.run({ [session.inputNames[0]]: tensor }),
+    30000, '识别超时'
+  );
+
+  const logits = results[session.outputNames[0]].data;
+  const exps = Array.from(logits, v => Math.exp(v));
+  const sum = exps.reduce((a, b) => a + b, 0);
+  const probs = exps.map(e => e / sum);
+  // top8 中找第一个衣物类
+  const top = probs.map((p, i) => ({ i, p })).sort((a, b) => b.p - a.p).slice(0, 8);
+  for (const t of top) {
+    const hit = CLOTHES_MAP[t.i];
+    if (hit) {
+      return Object.assign({ prob: t.p }, hit);
+    }
+  }
+  // 没找到衣物类 → 形状启发式兜底（抠图后的前景宽高比）
+  const ratio = img.height / img.width;
+  if (ratio > 1.7) return { cat: 'bottom', thick: 2, seasons: ['春', '秋', '冬'], label: '下装', prob: 0, fallback: true };
+  return null;
 }
 
 /* 裁掉全透明边缘并限制尺寸，输出透明 PNG */
@@ -664,6 +844,8 @@ function openClothModal(item) {
   renderPhotoPreview(pendingImage);
   const st = $('#cutStatus');
   st.textContent = ''; st.className = 'cut-status';
+  delete st.dataset.origin;
+  $('#btnRetryAI').style.display = 'none';
   setChips($('#catChips'), null, false, [item ? item.cat : 'top']);
   setChips($('#colorChips'), null, false, [item ? item.color : '白']);
   setChips($('#seasonChips'), null, true, item ? item.seasons : ['春', '夏', '秋', '冬']);
@@ -814,37 +996,105 @@ function init() {
   // 添加衣物 / 拍照上传
   $('#btnAddCloth').onclick = () => openClothModal();
   $('#photoPicker').onclick = () => $('#fileInput').click();
-  $('#fileInput').onchange = async (e) => {
+  $('#fileInput').onchange = (e) => {
     const file = e.target.files && e.target.files[0];
     if (!file) return;
+    e.target.value = '';
+    processUpload(file);
+  };
+
+  // 「重新识别」按钮（AI 失败后可重试）
+  $('#btnRetryAI').onclick = () => {
+    if (!pendingImage) return;
     const st = $('#cutStatus');
+    if (st.dataset.origin) {
+      // 用原图重跑完整识别流程
+      const origin = st.dataset.origin;
+      const fakeFile = dataUrlToFile(origin);
+      if (fakeFile) { processUpload(fakeFile); return; }
+    }
+    toast('请重新上传照片');
+  };
+
+  async function processUpload(file) {
+    const st = $('#cutStatus');
+    delete st.dataset.origin;
     try {
       // 1. 压缩并立即预览原图
-      st.textContent = ''; st.className = 'cut-status';
-      pendingImage = await compressImage(file);
+      st.textContent = '正在处理照片…';
+      st.className = 'cut-status busy';
+      const origin = await compressImage(file, 640, 0.9);
+      st.dataset.origin = origin; // 留作重试
+      pendingImage = origin;
       renderPhotoPreview(pendingImage);
 
-      // 2. 自动 AI 抠图（首次会加载模型，约 19MB，之后有缓存）
-      st.textContent = 'AI 正在识别衣物并抠图…（首次约需十几秒）';
+      // 2. AI 抠图（u2netp，带超时；失败 → 纯色背景移除兜底）
+      st.textContent = 'AI 正在识别衣物并抠图…（首次需下载约 28MB 模型，仅一次）';
       st.className = 'cut-status busy';
-      const cut = await aiRemoveBackground(pendingImage);
+      let cut = null, cutMode = 'ai';
+      try {
+        cut = await aiRemoveBackground(origin);
+      } catch (err) {
+        console.warn('AI 抠图失败，走快速兜底:', err.message);
+        cut = null;
+      }
+      if (!cut) {
+        try {
+          cut = await fastRemoveBg(origin);
+          cutMode = 'fast';
+        } catch { cut = origin; cutMode = 'none'; }
+      }
       pendingImage = cut;
       renderPhotoPreview(pendingImage);
-      st.textContent = '已自动抠去背景 ✓';
-      st.className = 'cut-status ok';
 
-      // 3. 在抠图结果上识别颜色（更准）
-      const guessed = await guessColor(pendingImage);
-      if (guessed) setChips($('#colorChips'), null, false, [guessed]);
-    } catch (err) {
-      console.error('AI 抠图失败:', err);
-      st.textContent = 'AI 抠图暂不可用，已保留原图（可直接保存）';
-      st.className = 'cut-status err';
+      // 3. 识别衣物属性（品类/厚薄/季节）
+      st.textContent = '正在识别衣物类型…';
+      st.className = 'cut-status busy';
+      let cls = null;
+      if (cutMode !== 'none') {
+        cls = await classifyCloth(cut).catch(err => { console.warn('分类失败:', err.message); return null; });
+      }
+
+      // 4. 颜色识别（抠图后的前景更准）
       const guessed = await guessColor(pendingImage).catch(() => '');
-      if (guessed) setChips($('#colorChips'), null, false, [guessed]);
+
+      // 5. 预填识别结果（用户可再调整）
+      const parts = [];
+      if (cls) {
+        setChips($('#catChips'), null, false, [cls.cat]);
+        setChips($('#thickChips'), null, false, [String(cls.thick)]);
+        setChips($('#seasonChips'), null, true, cls.seasons);
+        parts.push(cls.zh || CAT_NAMES[cls.cat]);
+        parts.push(THICK_NAMES[cls.thick]);
+      } else {
+        parts.push('类别未识别');
+      }
+      if (guessed) {
+        setChips($('#colorChips'), null, false, [guessed]);
+        parts.push(guessed);
+      }
+
+      // 6. 状态汇总
+      if (cutMode === 'ai') {
+        st.textContent = '已自动抠图 ✓ 识别：' + parts.join(' · ') + '（可调整）';
+        st.className = 'cut-status ok';
+        $('#btnRetryAI').style.display = 'none';
+      } else if (cutMode === 'fast') {
+        st.textContent = 'AI 模型加载失败，已用快速抠图。识别：' + parts.join(' · ');
+        st.className = 'cut-status err';
+        $('#btnRetryAI').style.display = 'inline-block';
+      } else {
+        st.textContent = '抠图不可用（已保留原图）。识别：' + parts.join(' · ') + '，可手动填写后保存';
+        st.className = 'cut-status err';
+        $('#btnRetryAI').style.display = 'inline-block';
+      }
+    } catch (err) {
+      console.error('上传处理失败:', err);
+      st.textContent = '处理失败：' + (err.message || '未知错误') + '。可重试或直接保存';
+      st.className = 'cut-status err';
+      $('#btnRetryAI').style.display = 'inline-block';
     }
-    e.target.value = '';
-  };
+  }
 
   // 弹窗交互（单选：类别/颜色/厚薄；多选：季节/风格）
   $('#catChips').addEventListener('click', ev => {
