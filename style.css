@@ -25,7 +25,8 @@ body{
 .app{
   width:100%;max-width:480px;min-height:100vh;
   background:var(--bg);position:relative;
-  padding-bottom:84px;
+  /* 底部导航 + 留足余量 + 手机安全区，确保页面最后几行不被挡住 */
+  padding-bottom:calc(120px + env(safe-area-inset-bottom));
 }
 /* 桌面端居中显示 */
 @media (min-width:600px){

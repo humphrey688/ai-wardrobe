@@ -139,7 +139,88 @@ async function searchCity(q) {
   }));
 }
 
+/* 高德天气（中国气象局数据源，国内更准）。设置里填了 Key 就优先使用，失败回退 Open-Meteo */
+const CITY_ADCODE = {
+  '北京': '110000', '上海': '310000', '天津': '120000', '重庆': '500000',
+  '武汉': '420100', '广州': '440100', '深圳': '440300', '成都': '510100',
+  '杭州': '330100', '南京': '320100', '西安': '610100', '苏州': '320500',
+  '长沙': '430100', '郑州': '410100', '青岛': '370200', '济南': '370100',
+  '大连': '210200', '厦门': '350200', '福州': '350100', '合肥': '340100',
+  '昆明': '530100', '贵阳': '520100', '南宁': '450100', '兰州': '620100',
+  '太原': '140100', '石家庄': '130100', '哈尔滨': '230100', '长春': '220100',
+  '南昌': '360100', '海口': '460100', '呼和浩特': '150100', '乌鲁木齐': '650100',
+  '拉萨': '540100', '西宁': '630100', '银川': '640100', '香港': '810000', '澳门': '820000', '台北': '710000',
+};
+
+function mapAmapIcon(text) {
+  const t = text || '';
+  if (t.includes('雷')) return '⛈️';
+  if (t.includes('雪')) return '🌨️';
+  if (t.includes('雨')) return '🌧️';
+  if (t.includes('沙') || t.includes('尘')) return '🌫️';
+  if (t.includes('雾') || t.includes('霾')) return '🌫️';
+  if (t.includes('阴')) return '☁️';
+  if (t.includes('多云')) return '⛅';
+  if (t.includes('晴')) return '☀️';
+  return '🌤️';
+}
+
+async function fetchWeatherAmap(city, key) {
+  const cityName = String(city.name || '').split(/[·,,，\s]/)[0] || '武汉';
+  let adcode = CITY_ADCODE[cityName];
+  if (!adcode) {
+    try {
+      const g = await fetchJson(`https://restapi.amap.com/v3/geocode/geo?address=${encodeURIComponent(cityName)}&key=${key}`);
+      if (g && g.status === '1' && g.geocodes && g.geocodes.length) adcode = g.geocodes[0].adcode;
+    } catch { /* 走兜底 */ }
+  }
+  if (!adcode) throw new Error('高德无法定位该城市');
+
+  const base = await fetchJson(`https://restapi.amap.com/v3/weather/weatherInfo?key=${encodeURIComponent(key)}&city=${adcode}&extensions=base`);
+  if (!base || base.status !== '1' || !base.lives || !base.lives.length) {
+    throw new Error((base && base.info) || '高德天气失败');
+  }
+  const live = base.lives[0];
+  const today = {
+    temperature: Number(live.temperature),
+    feelsLike: Number(live.temperature),
+    condition: live.weather, icon: mapAmapIcon(live.weather),
+    humidity: Number(live.humidity || 60),
+    windScale: live.windpower ? live.windpower + '级' : '微风',
+    precip: 0, location: cityName, source: 'amap',
+  };
+
+  let tomorrow = null;
+  try {
+    const all = await fetchJson(`https://restapi.amap.com/v3/weather/weatherInfo?key=${encodeURIComponent(key)}&city=${adcode}&extensions=all`);
+    const casts = all && all.forecasts && all.forecasts[0] && all.forecasts[0].casts;
+    const tmr = casts && casts[1];
+    if (tmr) {
+      const dayT = Number(tmr.daytemp), nightT = Number(tmr.nighttemp);
+      tomorrow = {
+        temperature: Math.round((dayT + nightT) / 2),
+        feelsLike: Math.round((dayT + nightT) / 2),
+        condition: tmr.dayweather, icon: mapAmapIcon(tmr.dayweather),
+        tmin: nightT, tmax: dayT, rainProb: 0, humidity: 0,
+        windScale: tmr.daypower ? tmr.daypower + '级' : '微风',
+        precip: 0, location: cityName, source: 'amap',
+      };
+    }
+  } catch (e) { console.warn('高德预报失败:', e); }
+  if (!tomorrow) tomorrow = Object.assign({}, today);
+  return { today, tomorrow };
+}
+
 async function fetchWeather(city) {
+  // 优先：高德天气（填了 Key 才启用；数据源为中国气象局，国内更准）
+  if (state.settings && state.settings.amapKey) {
+    try {
+      return await fetchWeatherAmap(city, state.settings.amapKey);
+    } catch (e) {
+      console.warn('高德天气不可用，回退 Open-Meteo:', e.message);
+    }
+  }
+
   const params = new URLSearchParams({
     latitude: city.lat, longitude: city.lon, timezone: 'auto',
     current: 'temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,is_day,wind_speed_10m,precipitation',
@@ -249,10 +330,11 @@ function renderWeather(w) {
   const isTomorrow = state.targetDay === 'tomorrow';
   $('#weatherLoc').textContent = (isTomorrow ? '明天 · ' : '') + w.location;
   $('#weatherTemp').textContent = Math.round(w.temperature) + '°';
+  const src = w.source === 'amap' ? ' · 高德' : '';
   if (isTomorrow && w.tmin !== undefined) {
-    $('#weatherSub').textContent = `${w.condition} · 白天体感 ${w.tmin}~${w.tmax}°${w.rainProb ? ` · 降水概率 ${w.rainProb}%` : ''}`;
+    $('#weatherSub').textContent = `${w.condition} · 白天体感 ${w.tmin}~${w.tmax}°${w.rainProb ? ` · 降水概率 ${w.rainProb}%` : ''}${src}`;
   } else {
-    $('#weatherSub').textContent = `${w.condition} · 体感 ${Math.round(w.feelsLike)}° · 湿度 ${w.humidity}% · ${w.windScale}风`;
+    $('#weatherSub').textContent = `${w.condition} · 体感 ${Math.round(w.feelsLike)}° · 湿度 ${w.humidity}% · ${w.windScale}风${src}`;
   }
   $('#weatherIcon').textContent = w.icon;
 }
@@ -1290,8 +1372,10 @@ function renderSettings() {
 
   $('#cityInput').value = s.city ? s.city.name : '';
   $('#cityNote').textContent = s.city
-    ? `当前城市：${s.city.name}${s.city.admin1 ? '（' + s.city.admin1 + '）' : ''} · 天气来自 Open-Meteo 免费接口`
+    ? `当前城市：${s.city.name}${s.city.admin1 ? '（' + s.city.admin1 + '）' : ''} · ${s.amapKey ? '高德天气（中国气象局数据）' : 'Open-Meteo 免费接口'}`
     : '天气来自 Open-Meteo 免费接口，无需注册';
+  const amapInput = $('#amapKeyInput');
+  if (amapInput && document.activeElement !== amapInput) amapInput.value = s.amapKey || '';
 
   // 云端同步状态回显
   const st2 = $('#syncTokenInput');
@@ -1639,6 +1723,11 @@ function renderAll() {
 
 /* ================= 初始化 ================= */
 function init() {
+  // Service Worker：缓存 /libs/ 模型与运行时（约 28MB，内容不变），下载一次永久生效，页面更新不受影响
+  if ('serviceWorker' in navigator && (location.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(location.hostname))) {
+    navigator.serviceWorker.register('./sw.js').catch(err => console.warn('SW 注册失败:', err));
+  }
+
   state.clothes = Store.clothes();
   state.diary = Store.diary();
   state.outfits = Store.outfits();
@@ -2043,6 +2132,16 @@ function init() {
       box.innerHTML = '<div class="city-item">网络不可用，稍后重试</div>';
     }
   }
+
+  // 高德天气 Key：填了立即切换为中国气象局数据源（与手机自带天气一致）
+  $('#amapKeyInput').onchange = () => {
+    const k = $('#amapKeyInput').value.trim();
+    state.settings.amapKey = k;
+    Store.saveSettings(state.settings);
+    renderSettings();
+    loadWeather();
+    toast(k ? '高德 Key 已保存，天气将用中国气象局数据 ✓' : '已清空 Key，改用 Open-Meteo 免费接口');
+  };
 
   // 数据导出/导入/清空
   $('#btnExport').onclick = exportData;
