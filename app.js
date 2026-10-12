@@ -236,9 +236,54 @@ function dataUrlToFile(dataUrl) {
  * 抠图模型 u2netp.onnx 4.4MB（rembg 同款轻量版），分类模型 mobilenetv2.onnx 13.3MB。
  * 全部浏览器内推理，无需服务器。首次使用需下载约 28MB（含运行时），之后浏览器缓存。
  * 所有环节带超时与降级，失败不阻塞保存。
+ * 模型下载带实时进度回调（流式 fetch），推理阶段显示不定进度动画。
  */
 let _ortPromise = null;
 let _ortRetry = 0;
+
+/* 进度回调（由 processUpload 注入） */
+let _aiProgress = null;
+function setAIProgress(fn) { _aiProgress = fn; }
+function reportAIProgress(stage, detail) {
+  if (typeof _aiProgress === 'function') { try { _aiProgress(stage, detail); } catch { } }
+}
+
+/* 带下载进度的 fetch（ReadableStream 流式读取字节） */
+async function progressFetch(url, opts) {
+  const res = await fetch(url, opts);
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const total = Number(res.headers.get('content-length')) || 0;
+  const filename = (url.split('/').pop() || '').split('?')[0];
+
+  if (!res.body || !total) {
+    // 无法流式（如缓存命中）→ 直接返回
+    reportAIProgress('download', { filename, loaded: total, total, done: true });
+    return res;
+  }
+
+  const reader = res.body.getReader();
+  let loaded = 0;
+  const chunks = [];
+  let lastReport = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    loaded += value.length;
+    const now = Date.now();
+    if (now - lastReport > 150) { // 节流 150ms
+      lastReport = now;
+      reportAIProgress('download', { filename, loaded, total, done: false });
+    }
+  }
+  reportAIProgress('download', { filename, loaded, total, done: true });
+
+  const type = res.headers.get('content-type') || 'application/octet-stream';
+  const blob = new Blob(chunks, { type });
+  return new Response(blob, {
+    status: res.status, statusText: res.statusText, headers: res.headers,
+  });
+}
 
 function ensureOrt() {
   if (!_ortPromise) {
@@ -255,12 +300,28 @@ function ensureOrt() {
 }
 
 const _sessions = {};
+const _modelBlobs = {}; // 已下载模型的 Blob URL（内存缓存）
+
+/* 预下载模型到内存 Blob（带精确进度），重复调用命中缓存 */
+async function ensureModelBlob(modelPath) {
+  if (_modelBlobs[modelPath]) return _modelBlobs[modelPath];
+  const res = await progressFetch(modelPath);
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  _modelBlobs[modelPath] = url;
+  return url;
+}
 
 function ensureSession(modelPath) {
   if (!_sessions[modelPath]) {
     _sessions[modelPath] = (async () => {
+      // 先带进度下载模型 → 再建 session（Blob URL 加载，无需再次网络请求）
+      const modelUrl = await ensureModelBlob(modelPath);
       const ort = await ensureOrt();
-      return ort.InferenceSession.create(modelPath, { executionProviders: ['wasm'] });
+      reportAIProgress('load', { model: modelPath });
+      return ort.InferenceSession.create(modelUrl, {
+        executionProviders: ['wasm'],
+      });
     })();
     // 失败时清缓存并重置 ort（wasm 初始化失败后内部状态无法恢复，需新实例），允许下次重试
     _sessions[modelPath].catch(() => {
@@ -846,6 +907,7 @@ function openClothModal(item) {
   st.textContent = ''; st.className = 'cut-status';
   delete st.dataset.origin;
   $('#btnRetryAI').style.display = 'none';
+  $('#aiProgressWrap').style.display = 'none';
   setChips($('#catChips'), null, false, [item ? item.cat : 'top']);
   setChips($('#colorChips'), null, false, [item ? item.color : '白']);
   setChips($('#seasonChips'), null, true, item ? item.seasons : ['春', '夏', '秋', '冬']);
@@ -1018,6 +1080,52 @@ function init() {
 
   async function processUpload(file) {
     const st = $('#cutStatus');
+    const wrap = $('#aiProgressWrap');
+    const bar = $('#aiProgressBar');
+    const ptext = $('#aiProgressText');
+    const barBox = wrap.querySelector('.progress-bar');
+
+    // 进度 UI 控制
+    const showIndeterminate = (text) => {
+      wrap.style.display = 'block';
+      barBox.classList.add('indeterminate');
+      bar.style.width = '30%';
+      ptext.innerHTML = text;
+    };
+    const showDownload = (loaded, total, speed) => {
+      wrap.style.display = 'block';
+      barBox.classList.remove('indeterminate');
+      const pct = total ? Math.min(100, Math.round(loaded / total * 100)) : 0;
+      bar.style.width = pct + '%';
+      const mb = (n) => (n / 1048576).toFixed(1);
+      ptext.innerHTML = total
+        ? `下载 AI 模型 ${pct}% <span class="speed">(${mb(loaded)} / ${mb(total)} MB${speed ? ' · ' + speed : ''})</span>`
+        : `下载 AI 模型… ${mb(loaded)} MB`;
+    };
+    const hideProgress = () => { wrap.style.display = 'none'; };
+
+    // AI 进度回调（节流在 progressFetch 里已做）
+    let downStart = 0, downLoaded0 = 0;
+    setAIProgress((stage, d) => {
+      if (stage === 'download') {
+        if (!d.done) {
+          const now = Date.now();
+          if (!downStart) { downStart = now; downLoaded0 = d.loaded; }
+          const dt = (now - downStart) / 1000;
+          if (d.total && dt > 1) {
+            const speed = (d.loaded - downLoaded0) / dt / 1048576;
+            showDownload(d.loaded, d.total, speed.toFixed(1) + ' MB/s');
+          } else {
+            showDownload(d.loaded, d.total);
+          }
+        } else if (d.total) {
+          showDownload(d.total, d.total);
+        }
+      } else if (stage === 'load') {
+        showIndeterminate('模型加载初始化中…');
+      }
+    });
+
     delete st.dataset.origin;
     try {
       // 1. 压缩并立即预览原图
@@ -1029,7 +1137,8 @@ function init() {
       renderPhotoPreview(pendingImage);
 
       // 2. AI 抠图（u2netp，带超时；失败 → 纯色背景移除兜底）
-      st.textContent = 'AI 正在识别衣物并抠图…（首次需下载约 28MB 模型，仅一次）';
+      st.textContent = '';
+      showIndeterminate('AI 正在识别衣物并抠图…');
       st.className = 'cut-status busy';
       let cut = null, cutMode = 'ai';
       try {
@@ -1038,7 +1147,10 @@ function init() {
         console.warn('AI 抠图失败，走快速兜底:', err.message);
         cut = null;
       }
+      hideProgress();
+
       if (!cut) {
+        st.textContent = 'AI 模型加载失败，尝试快速抠图…';
         try {
           cut = await fastRemoveBg(origin);
           cutMode = 'fast';
@@ -1050,10 +1162,12 @@ function init() {
       // 3. 识别衣物属性（品类/厚薄/季节）
       st.textContent = '正在识别衣物类型…';
       st.className = 'cut-status busy';
+      showIndeterminate('正在识别衣物类型（品类/厚薄/季节）…');
       let cls = null;
       if (cutMode !== 'none') {
         cls = await classifyCloth(cut).catch(err => { console.warn('分类失败:', err.message); return null; });
       }
+      hideProgress();
 
       // 4. 颜色识别（抠图后的前景更准）
       const guessed = await guessColor(pendingImage).catch(() => '');
@@ -1075,6 +1189,8 @@ function init() {
       }
 
       // 6. 状态汇总
+      hideProgress();
+      setAIProgress(null);
       if (cutMode === 'ai') {
         st.textContent = '已自动抠图 ✓ 识别：' + parts.join(' · ') + '（可调整）';
         st.className = 'cut-status ok';
@@ -1090,9 +1206,14 @@ function init() {
       }
     } catch (err) {
       console.error('上传处理失败:', err);
+      hideProgress();
+      setAIProgress(null);
       st.textContent = '处理失败：' + (err.message || '未知错误') + '。可重试或直接保存';
       st.className = 'cut-status err';
       $('#btnRetryAI').style.display = 'inline-block';
+    } finally {
+      hideProgress();
+      setAIProgress(null);
     }
   }
 

@@ -325,6 +325,28 @@ body{
   color:var(--primary);border-radius:999px;padding:5px 14px;font-size:12px;cursor:pointer;
 }
 
+/* ============ AI 进度条 ============ */
+.progress-wrap{margin-top:8px;padding:10px 12px;background:var(--primary-soft);border-radius:12px}
+.progress-bar{
+  height:8px;border-radius:999px;background:rgba(79,195,161,.18);
+  overflow:hidden;position:relative;
+}
+.progress-bar i{
+  display:block;height:100%;width:0%;
+  background:linear-gradient(90deg,var(--primary),#79ddbb);
+  border-radius:999px;transition:width .25s ease;
+}
+.progress-bar.indeterminate i{
+  width:30%;animation:slide 1.2s ease-in-out infinite;
+}
+@keyframes slide{
+  0%{margin-left:-30%}
+  60%{margin-left:100%}
+  100%{margin-left:100%}
+}
+.progress-text{font-size:11px;color:var(--primary);font-weight:600;margin-top:6px;text-align:center}
+.progress-text .speed{font-weight:400;opacity:.75}
+
 /* 加载动画 */
 .loading-dots{display:flex;justify-content:center;gap:6px;padding:20px}
 .loading-dots i{
