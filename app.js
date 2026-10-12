@@ -97,6 +97,8 @@ const Store = {
 let state = {
   clothes: [], diary: [], settings: null,
   goal: '日常', wardrobeTab: 'all',
+  targetDay: 'tomorrow',  // 默认为明天搭配（今晚选好明天的衣服）
+  weather: null,          // { today, tomorrow }
 };
 
 /* ================= 天气（Open-Meteo） ================= */
@@ -139,6 +141,8 @@ async function fetchWeather(city) {
   const params = new URLSearchParams({
     latitude: city.lat, longitude: city.lon, timezone: 'auto',
     current: 'temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,is_day,wind_speed_10m,precipitation',
+    hourly: 'apparent_temperature,weather_code,precipitation_probability',
+    forecast_days: '2',
   });
   const r = await fetchJson(`https://api.open-meteo.com/v1/forecast?${params}`);
   const c = r.current || {};
@@ -147,7 +151,7 @@ async function fetchWeather(city) {
   const condition = mapWeatherCode(code, isDay);
   const windKmh = Number(c.wind_speed_10m ?? 0);
   const windScale = windKmh < 5 ? 1 : Math.min(12, Math.round(windKmh / 10));
-  return {
+  const today = {
     temperature: Number(c.temperature_2m ?? 20),
     feelsLike: Number(c.apparent_temperature ?? c.temperature_2m ?? 20),
     condition, icon: WEATHER_ICON[condition] || '🌤️',
@@ -156,6 +160,57 @@ async function fetchWeather(city) {
     precip: Number(c.precipitation ?? 0),
     location: city.name || '当前位置',
   };
+
+  /* 明天预报：取明天 7:00-22:00 的逐小时数据汇总 */
+  let tomorrow = null;
+  try {
+    const times = (r.hourly && r.hourly.time) || [];
+    const tDate = tomorrowStr();
+    let sum = 0, n = 0, codeCount = {}, tmin = Infinity, tmax = -Infinity, rainProb = 0;
+    for (let i = 0; i < times.length; i++) {
+      if (!String(times[i]).startsWith(tDate)) continue;
+      const hour = parseInt(String(times[i]).slice(11, 13), 10);
+      if (hour < 7 || hour > 22) continue;
+      const at = Number((r.hourly.apparent_temperature || [])[i] ?? 20);
+      const wc = Number((r.hourly.weather_code || [])[i] ?? 0);
+      const pp = Number((r.hourly.precipitation_probability || [])[i] ?? 0);
+      sum += at; n++;
+      codeCount[wc] = (codeCount[wc] || 0) + 1;
+      if (at < tmin) tmin = at;
+      if (at > tmax) tmax = at;
+      if (pp > rainProb) rainProb = pp;
+    }
+    if (n > 0) {
+      const ranked = Object.entries(codeCount).sort((a, b) => b[1] - a[1]);
+      const domCode = Number(ranked[0][0]);
+      const tcond = mapWeatherCode(domCode, 1);
+      const feels = Math.round(sum / n);
+      tomorrow = {
+        temperature: feels,
+        feelsLike: feels,
+        condition: tcond, icon: WEATHER_ICON[tcond] || '🌤️',
+        tmin: Math.round(tmin), tmax: Math.round(tmax),
+        rainProb, humidity: 0,
+        windScale: today.windScale, precip: 0,
+        location: city.name || '当前位置',
+      };
+    }
+  } catch (e) { console.warn('解析明日预报失败:', e); }
+  if (!tomorrow) tomorrow = Object.assign({}, today); // 兜底：明天数据缺失时用当前
+  return { today, tomorrow };
+}
+
+function tomorrowStr() {
+  const d = new Date(Date.now() + 24 * 3600 * 1000);
+  return `${d.getFullYear()}-${fmt(d.getMonth() + 1)}-${fmt(d.getDate())}`;
+}
+function targetDateStr() {
+  return state.targetDay === 'today' ? todayStr() : tomorrowStr();
+}
+function weatherForTarget() {
+  const w = state.weather;
+  if (!w) return null;
+  return state.targetDay === 'today' ? w.today : w.tomorrow;
 }
 
 async function loadWeather() {
@@ -171,20 +226,55 @@ async function loadWeather() {
   $('#weatherSub').textContent = '正在获取天气…';
   try {
     const w = await fetchWeather(s.city);
-    renderWeather(w);
-    return w;
+    state.weather = w;
+    renderWeather(weatherForTarget());
+    renderTodayWorn();
+    return weatherForTarget();
   } catch {
-    const w = { temperature: 20, feelsLike: 22, condition: '晴', icon: '🌤️', humidity: 60, windScale: '2级', precip: 0, location: s.city.name };
+    const w = {
+      today: { temperature: 20, feelsLike: 22, condition: '晴', icon: '🌤️', humidity: 60, windScale: '2级', precip: 0, location: s.city.name },
+      tomorrow: { temperature: 20, feelsLike: 21, condition: '晴', icon: '🌤️', tmin: 18, tmax: 24, rainProb: 10, humidity: 60, windScale: '2级', precip: 0, location: s.city.name },
+    };
+    state.weather = w;
     $('#weatherSub').textContent = '天气获取失败，使用模拟数据（可重试）';
-    renderWeather(w);
-    return w;
+    renderWeather(weatherForTarget());
+    renderTodayWorn();
+    return weatherForTarget();
   }
 }
 function renderWeather(w) {
-  $('#weatherLoc').textContent = w.location;
+  if (!w) return;
+  const isTomorrow = state.targetDay === 'tomorrow';
+  $('#weatherLoc').textContent = (isTomorrow ? '明天 · ' : '') + w.location;
   $('#weatherTemp').textContent = Math.round(w.temperature) + '°';
-  $('#weatherSub').textContent = `${w.condition} · 体感 ${Math.round(w.feelsLike)}° · 湿度 ${w.humidity}% · ${w.windScale}风`;
+  if (isTomorrow && w.tmin !== undefined) {
+    $('#weatherSub').textContent = `${w.condition} · 白天体感 ${w.tmin}~${w.tmax}°${w.rainProb ? ` · 降水概率 ${w.rainProb}%` : ''}`;
+  } else {
+    $('#weatherSub').textContent = `${w.condition} · 体感 ${Math.round(w.feelsLike)}° · 湿度 ${w.humidity}% · ${w.windScale}风`;
+  }
   $('#weatherIcon').textContent = w.icon;
+}
+
+/* 首页"今天已穿"摘要 */
+function renderTodayWorn() {
+  const bar = $('#todayWorn');
+  if (!bar) return;
+  const worn = state.diary.find(d => d.date === todayStr());
+  if (worn && worn.items.length) {
+    bar.style.display = 'block';
+    bar.innerHTML = `✓ 今天已穿：${worn.items.map(it => esc(it.name)).join(' + ')}`;
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
+/* 按"今天/明天"切换更新首页文案 */
+function updateDayUI() {
+  const isTomorrow = state.targetDay === 'tomorrow';
+  const gt = $('#goalTitle');
+  if (gt) gt.textContent = isTomorrow ? '明天要去做什么？' : '今天要去做什么？';
+  const bt = $('#btnGenerateText');
+  if (bt) bt.textContent = isTomorrow ? '生成明日搭配' : '生成今日搭配';
 }
 
 /* ================= 图片处理 ================= */
@@ -659,7 +749,7 @@ function guessColor(dataUrl) {
 function tempProfile(feelsLike) {
   if (feelsLike <= 5) return {
     label: '寒冷', seasons: ['冬'],
-    advice: '今天很冷，优先厚羽绒服、羊毛衫、加绒长裤和保暖鞋，围巾手套安排上。',
+    advice: '天气很冷，优先厚羽绒服、羊毛衫、加绒长裤和保暖鞋，围巾手套安排上。',
     thick: { 3: 10, 2: 0, 1: -8 },
   };
   if (feelsLike <= 14) return {
@@ -679,7 +769,7 @@ function tempProfile(feelsLike) {
   };
   return {
     label: '炎热', seasons: ['夏'],
-    advice: '今天很热，选吸汗透气的轻薄衣物，能少穿就少穿。',
+    advice: '天气很热，选吸汗透气的轻薄衣物，能少穿就少穿。',
     thick: { 3: -5, 2: -1, 1: 3 },
   };
 }
@@ -719,7 +809,12 @@ function scoreItem(item, profile, goal, weather, settings, rand) {
   if (item.cat === 'shoes' && isRainy) {
     const text = item.name + (item.tags || []).join('');
     if (/防水|雨靴|短靴|靴/.test(text)) { score += 10; reasons.push('防滑防水'); }
-    else { score -= 5; reasons.push('今天有雨，鞋要防滑'); }
+    else { score -= 5; reasons.push('有雨，鞋要防滑'); }
+  }
+
+  // 今天刚穿过的衣服轻微减分（自然隔天换装；衣柜够时避开）
+  if (item.lastWorn === todayStr()) {
+    score -= 6; reasons.push('今天刚穿过');
   }
 
   // 轻微随机扰动（同一天稳定，第二天自然变化）
@@ -786,19 +881,22 @@ function renderRecommendation(weather) {
   const goal = state.goal;
   const outfits = generateOutfits(goal, weather);
   const profile = outfits[0].profile;
-  const todayDiary = state.diary.find(d => d.date === todayStr());
+  const isTomorrow = state.targetDay === 'tomorrow';
+  const targetDate = targetDateStr();
+  const dayLabel = isTomorrow ? '明日' : '今日';
+  const diaryEntry = state.diary.find(d => d.date === targetDate);
 
   let html = `<div class="reco-block">
-    <div class="reco-head"><h3>今日穿搭方案</h3>
+    <div class="reco-head"><h3>${dayLabel}穿搭方案</h3>
       <button onclick="refreshReco()">换一批 ↻</button></div>
-    <div class="temp-rule">🧥 体感 ${Math.round(weather.feelsLike)}°C → <b>${profile.label}</b>：${profile.advice}</div>`;
+    <div class="temp-rule">🧥 ${dayLabel}${isTomorrow && weather.tmin !== undefined ? `白天体感 ${weather.tmin}~${weather.tmax}` : `体感 ${Math.round(weather.feelsLike)}`}°C → <b>${profile.label}</b>：${profile.advice}</div>`;
 
   const labels = ['方案 A', '方案 B', '方案 C'];
   // 判断方案是否与方案A重复（衣柜单品不够时会出现）
   const keyOf = o => o.items.map(it => it.c.id).sort().join(',');
   const firstKey = outfits[0] ? keyOf(outfits[0]) : '';
   outfits.forEach((o, idx) => {
-    const chosen = todayDiary && todayDiary.items.some(it => o.items.some(x => x.c.id === it.id));
+    const chosen = diaryEntry && diaryEntry.items.some(it => o.items.some(x => x.c.id === it.id));
     const dupWithFirst = idx > 0 && keyOf(o) === firstKey;
     const reason = idx === 0
       ? '综合得分最高'
@@ -824,7 +922,7 @@ function renderRecommendation(weather) {
     }
     html += `</div>
       <div class="outfit-actions">
-        <button class="btn-secondary pick-btn ${chosen ? 'outfit-picked' : ''}" data-idx="${idx}">${chosen ? '✓ 今天穿这套' : '选这套 ✨'}</button>
+        <button class="btn-secondary pick-btn ${chosen ? 'outfit-picked' : ''}" data-idx="${idx}">${chosen ? `✓ ${dayLabel}穿这套` : '选这套 ✨'}</button>
       </div>
     </div>`;
   });
@@ -847,7 +945,8 @@ function missingHint(missing) {
 function pickOutfit(idx, outfits, weather) {
   const o = outfits[idx];
   const list = Store.diary();
-  const today = todayStr();
+  const today = targetDateStr(); // 目标日期（今天/明天）
+  const isTomorrow = state.targetDay === 'tomorrow';
   // 同一天只保留一条记录
   const rest = list.filter(d => d.date !== today);
   const entry = {
@@ -866,9 +965,10 @@ function pickOutfit(idx, outfits, weather) {
   state.clothes = state.clothes.map(c => wornIds.includes(c.id) ? Object.assign({}, c, { wearCount: (c.wearCount || 0) + 1, lastWorn: today }) : c);
   Store.saveClothes(state.clothes);
 
-  // 重新渲染推荐（按钮变已选）+ 日记
+  // 重新渲染推荐（按钮变已选）+ 日记 + 首页已穿摘要
   renderRecommendation(weather);
-  toast('已记录今日穿搭 ✓');
+  renderTodayWorn();
+  toast(isTomorrow ? '已记为明日穿搭 ✓ 今晚不用纠结啦' : '已记录今日穿搭 ✓');
 }
 
 function refreshReco() {
@@ -1004,12 +1104,17 @@ function openClothModal(item) {
 
 /* ================= 渲染：日记 ================= */
 function renderDiary() {
-  const list = state.diary.slice().reverse();
+  const list = state.diary.slice().sort((a, b) => b.date.localeCompare(a.date));
   const box = $('#diaryList');
   $('#diaryEmpty').style.display = list.length ? 'none' : 'block';
-  box.innerHTML = list.map(d => `
+  box.innerHTML = list.map(d => {
+    const isPlan = d.date > todayStr();
+    const isToday = d.date === todayStr();
+    const dateLabel = isPlan ? `📅 ${d.date}（明日计划）`
+      : isToday ? `${d.date}（今天）` : d.date;
+    return `
     <div class="diary-item">
-      <div class="diary-date">${d.date}
+      <div class="diary-date">${dateLabel}
         <span class="w">${d.weather ? d.weather.condition + ' ' + Math.round(d.weather.temperature) + '°' : ''} · ${d.goal || '日常'}</span>
       </div>
       <div class="diary-items">
@@ -1019,7 +1124,8 @@ function renderDiary() {
             <span>${esc(it.name)}</span>
           </div>`).join('')}
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
 }
 
 /* ================= 渲染：设置 ================= */
@@ -1286,6 +1392,19 @@ function init() {
     $$('#goalChips .chip').forEach(c => c.classList.remove('active'));
     ch.classList.add('active');
     state.goal = ch.dataset.goal;
+  });
+
+  // 今天/明天切换（默认面向明天）
+  $$('#daySwitch .chip').forEach(ch => ch.onclick = () => {
+    $$('#daySwitch .chip').forEach(c => c.classList.remove('active'));
+    ch.classList.add('active');
+    state.targetDay = ch.dataset.day;
+    updateDayUI();
+    const w = weatherForTarget();
+    if (w) {
+      renderWeather(w);
+      renderRecommendation(w); // 已有结果时按新目标重算
+    }
   });
 
   // 生成推荐
@@ -1684,6 +1803,8 @@ function init() {
   renderWardrobe();
   renderDiary();
   renderSettings();
+  updateDayUI();
+  renderTodayWorn();
   loadWeather();
 }
 
