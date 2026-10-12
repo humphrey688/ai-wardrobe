@@ -103,6 +103,47 @@ body{
   font-size:12px;font-weight:600;line-height:1.6;
 }
 
+/* ============ 固定搭配 ============ */
+.saved-outfit{
+  background:var(--card);border:1px solid var(--line);border-radius:18px;
+  padding:14px;margin-bottom:12px;box-shadow:var(--shadow);
+}
+.saved-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.saved-name{font-size:15px;font-weight:700}
+.saved-meta{font-size:11px;color:var(--text-2);margin-top:2px}
+.saved-items{display:flex;flex-wrap:wrap;gap:8px}
+.saved-items .diary-piece{position:relative}
+.saved-actions{display:flex;gap:8px;margin-top:12px}
+.saved-actions .btn-secondary{flex:1;padding:8px;font-size:13px}
+.pick-btn-mini{
+  background:var(--primary-soft);border:1px solid var(--primary);color:var(--primary);
+  border-radius:12px;padding:8px;font-size:13px;font-weight:600;cursor:pointer;flex:1;
+}
+/* 推荐页固定搭配快捷条 */
+.star-outfit{
+  background:linear-gradient(135deg,#fffdf6,#fdf8ec);
+  border:1px solid #f2e5c0;border-radius:18px;padding:12px 14px;margin-bottom:12px;
+}
+.star-outfit .star-head{display:flex;justify-content:space-between;align-items:center}
+.star-outfit .star-name{font-size:14px;font-weight:700;color:#8a6d3b}
+.star-outfit .star-fit{font-size:11px;color:#5a7b5a;font-weight:600}
+.star-outfit .star-items{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.star-outfit .star-items span{
+  font-size:11px;background:#fff;border:1px solid #ead9b5;color:#8a6d3b;
+  padding:3px 8px;border-radius:999px;
+}
+.star-outfit .star-actions{margin-top:10px;display:flex;gap:8px}
+/* 新建搭配的衣物多选网格 */
+.pick-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;max-height:260px;overflow-y:auto}
+.pick-grid .pick-item{
+  border:2px solid var(--line);border-radius:12px;background:#fafbfd;
+  cursor:pointer;overflow:hidden;transition:.15s;padding:4px;
+}
+.pick-grid .pick-item img{width:100%;aspect-ratio:1;object-fit:contain;background:#f2f3f6;border-radius:8px}
+.pick-grid .pick-item p{font-size:10px;text-align:center;padding:3px 2px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pick-grid .pick-item.picked{border-color:var(--primary);background:var(--primary-soft)}
+.pick-grid .pick-item.picked p{color:var(--primary);font-weight:600}
+
 /* ============ 按钮 ============ */
 .btn-primary{
   background:linear-gradient(135deg,var(--primary),#3db893);

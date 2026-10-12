@@ -87,6 +87,8 @@ const Store = {
   saveClothes(list) { Store.set('clothes', list); },
   diary: () => Store.get('diary', []),
   saveDiary(list) { Store.set('diary', list); },
+  outfits: () => Store.get('outfits', []),
+  saveOutfits(list) { Store.set('outfits', list); },
   settings: () => Object.assign({
     city: { name: '武汉·华科', admin1: '湖北省', lat: 30.5113, lon: 114.4237 },
     favColors: [], avoidColors: [], favStyles: [],
@@ -95,8 +97,8 @@ const Store = {
 };
 
 let state = {
-  clothes: [], diary: [], settings: null,
-  goal: '日常', wardrobeTab: 'all',
+  clothes: [], diary: [], outfits: [], settings: null,
+  goal: '日常', wardrobeTab: 'all', outfitView: 'saved',
   targetDay: 'tomorrow',  // 默认为明天搭配（今晚选好明天的衣服）
   weather: null,          // { today, tomorrow }
 };
@@ -891,6 +893,41 @@ function renderRecommendation(weather) {
       <button onclick="refreshReco()">换一批 ↻</button></div>
     <div class="temp-rule">🧥 ${dayLabel}${isTomorrow && weather.tmin !== undefined ? `白天体感 ${weather.tmin}~${weather.tmax}` : `体感 ${Math.round(weather.feelsLike)}`}°C → <b>${profile.label}</b>：${profile.advice}</div>`;
 
+  /* 固定搭配快捷条：按天气匹配的套装备先展示 */
+  const starRand = mulberry32(daySeed());
+  const starFits = state.outfits
+    .map(o => {
+      const rand2 = mulberry32(daySeed()); // 每套独立随机避免同步扰动
+      let sum = 0, n = 0;
+      o.items.forEach(it => {
+        const c = state.clothes.find(x => x.id === it.id);
+        if (!c) return;
+        const r = scoreItem(c, profile, goal, weather, state.settings, rand2);
+        sum += r.score; n++;
+      });
+      return { o, avg: n ? sum / n : 0 };
+    })
+    .filter(x => x.o.items.length >= 2 && x.avg >= 62)
+    .sort((a, b) => b.avg - a.avg)
+    .slice(0, 3);
+  if (starFits.length) {
+    html += `<div class="star-outfit">
+      <div class="star-head">
+        <span class="star-name">⭐ 你的固定搭配（适合${dayLabel}）</span>
+        <span class="star-fit">一键整套穿</span>
+      </div>`;
+    starFits.forEach(s => {
+      html += `<div style="margin-top:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:13px;font-weight:700;color:#8a6d3b">${esc(s.o.name)}</span>
+          <button class="pick-btn-mini" data-starwear="${s.o.id}" style="flex:0 0 auto;padding:5px 12px">穿这套</button>
+        </div>
+        <div class="star-items">${s.o.items.map(it => `<span>${esc(it.name)}</span>`).join('')}</div>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+
   const labels = ['方案 A', '方案 B', '方案 C'];
   // 判断方案是否与方案A重复（衣柜单品不够时会出现）
   const keyOf = o => o.items.map(it => it.c.id).sort().join(',');
@@ -923,6 +960,7 @@ function renderRecommendation(weather) {
     html += `</div>
       <div class="outfit-actions">
         <button class="btn-secondary pick-btn ${chosen ? 'outfit-picked' : ''}" data-idx="${idx}">${chosen ? `✓ ${dayLabel}穿这套` : '选这套 ✨'}</button>
+        <button class="btn-secondary" data-saveoutfit="${idx}" style="flex:0 0 auto;padding:9px 12px" title="存为固定搭配">⭐ 存搭配</button>
       </div>
     </div>`;
   });
@@ -931,6 +969,12 @@ function renderRecommendation(weather) {
 
   $$('#recoResult .pick-btn').forEach(btn => {
     btn.onclick = () => pickOutfit(Number(btn.dataset.idx), outfits, weather);
+  });
+  $$('#recoResult [data-saveoutfit]').forEach(btn => {
+    btn.onclick = () => saveOutfitFromReco(Number(btn.dataset.saveoutfit), outfits);
+  });
+  $$('#recoResult [data-starwear]').forEach(btn => {
+    btn.onclick = () => { wearSavedOutfit(Number(btn.dataset.starwear)); renderRecommendation(weather); };
   });
 }
 
@@ -944,31 +988,30 @@ function missingHint(missing) {
 
 function pickOutfit(idx, outfits, weather) {
   const o = outfits[idx];
-  const list = Store.diary();
-  const today = targetDateStr(); // 目标日期（今天/明天）
   const isTomorrow = state.targetDay === 'tomorrow';
-  // 同一天只保留一条记录
-  const rest = list.filter(d => d.date !== today);
-  const entry = {
-    date: today,
-    goal: o.goal,
-    weather: { condition: weather.condition, temperature: weather.temperature, feelsLike: weather.feelsLike },
-    items: o.items.map(it => ({ id: it.c.id, name: it.c.name, cat: it.c.cat, image: it.c.image, why: it.why })),
-    profile: o.profile.label,
-  };
-  rest.unshift(entry);
-  Store.saveDiary(rest);
-  state.diary = rest;
-
-  // 更新穿着次数
-  const wornIds = o.items.map(it => it.c.id);
-  state.clothes = state.clothes.map(c => wornIds.includes(c.id) ? Object.assign({}, c, { wearCount: (c.wearCount || 0) + 1, lastWorn: today }) : c);
-  Store.saveClothes(state.clothes);
-
-  // 重新渲染推荐（按钮变已选）+ 日记 + 首页已穿摘要
+  recordOutfit(o.items.map(it => ({ id: it.c.id, name: it.c.name, cat: it.c.cat, image: it.c.image, why: it.why })), weather, o.goal);
   renderRecommendation(weather);
   renderTodayWorn();
   toast(isTomorrow ? '已记为明日穿搭 ✓ 今晚不用纠结啦' : '已记录今日穿搭 ✓');
+}
+
+/* 把推荐方案存为固定搭配 */
+function saveOutfitFromReco(idx, outfits) {
+  const o = outfits[idx];
+  if (!o || !o.items.length) return;
+  const defaultName = '我的搭配 ' + (state.outfits.length + 1);
+  const name = prompt('给这套搭配起个名字：', defaultName);
+  if (name === null) return;
+  const finalName = name.trim() || defaultName;
+  state.outfits.unshift({
+    id: Date.now(),
+    name: finalName,
+    items: o.items.map(it => ({ id: it.c.id, name: it.c.name, cat: it.c.cat, image: it.c.image })),
+    createdAt: Date.now(), useCount: 0, lastUsed: '',
+  });
+  Store.saveOutfits(state.outfits);
+  toast(`已存为固定搭配「${finalName}」⭐`);
+  renderRecommendation(weatherForTarget()); // 快捷条即时显示
 }
 
 function refreshReco() {
@@ -1103,6 +1146,112 @@ function openClothModal(item) {
 }
 
 /* ================= 渲染：日记 ================= */
+/* ================= 渲染：搭配页（固定搭配 | 穿搭日记） ================= */
+function renderOutfitsPage() {
+  const view = state.outfitView;
+  $$('#outfitTabs .chip').forEach(c => c.classList.toggle('active', c.dataset.view === view));
+  $('#savedOutfitsView').style.display = view === 'saved' ? 'block' : 'none';
+  $('#diaryView').style.display = view === 'diary' ? 'block' : 'none';
+  if (view === 'saved') renderSavedOutfits();
+  else renderDiary();
+}
+
+function renderSavedOutfits() {
+  const list = state.outfits.slice().sort((a, b) => (b.useCount || 0) - (a.useCount || 0) || b.createdAt - a.createdAt);
+  $('#savedEmpty').style.display = list.length ? 'none' : 'block';
+  const box = $('#savedOutfitList');
+  box.style.display = list.length ? 'block' : 'none';
+
+  box.innerHTML = list.map(o => {
+    const clothesNow = state.clothes.filter(c => o.items.some(it => it.id === c.id));
+    return `
+    <div class="saved-outfit" data-id="${o.id}">
+      <div class="saved-head">
+        <div>
+          <div class="saved-name">⭐ ${esc(o.name)}</div>
+          <div class="saved-meta">${o.items.length} 件 · 用过 ${o.useCount || 0} 次${o.lastUsed ? ' · 上次 ' + o.lastUsed : ''}</div>
+        </div>
+      </div>
+      <div class="saved-items">
+        ${o.items.map(it => `
+          <div class="diary-piece">
+            ${it.image ? `<img src="${it.image}" alt="">` : ''}
+            <span>${esc(it.name)}</span>
+          </div>`).join('')}
+      </div>
+      <div class="saved-actions">
+        <button class="pick-btn-mini" data-wear="${o.id}">✨ 穿这套</button>
+        <button class="btn-secondary" data-rename="${o.id}" style="flex:0 0 70px">改名</button>
+        <button class="btn-secondary" data-deloutfit="${o.id}" style="flex:0 0 70px;color:var(--danger)">删除</button>
+      </div>
+      ${clothesNow.length < o.items.length ? `<div class="field-note" style="margin-top:8px;color:var(--danger)">⚠ 有 ${o.items.length - clothesNow.length} 件衣物已从衣柜移除</div>` : ''}
+    </div>`;
+  }).join('');
+
+  // 事件
+  $$('#savedOutfitList [data-wear]').forEach(btn => btn.onclick = () => wearSavedOutfit(Number(btn.dataset.wear)));
+  $$('#savedOutfitList [data-rename]').forEach(btn => btn.onclick = () => {
+    const o = state.outfits.find(x => x.id === Number(btn.dataset.rename));
+    if (!o) return;
+    const name = prompt('新名称：', o.name);
+    if (name && name.trim()) { o.name = name.trim(); Store.saveOutfits(state.outfits); renderSavedOutfits(); }
+  });
+  $$('#savedOutfitList [data-deloutfit]').forEach(btn => btn.onclick = () => {
+    if (!confirm('删除这套固定搭配？')) return;
+    state.outfits = state.outfits.filter(x => x.id !== Number(btn.dataset.deloutfit));
+    Store.saveOutfits(state.outfits);
+    renderSavedOutfits();
+    toast('已删除');
+  });
+}
+
+/* 穿固定搭配：记入目标日期日记 + 更新统计 */
+function wearSavedOutfit(outfitId) {
+  const o = state.outfits.find(x => x.id === outfitId);
+  if (!o) return;
+  const weather = weatherForTarget() || { condition: '晴', temperature: 20, feelsLike: 20 };
+  const date = targetDateStr();
+  recordOutfit(o.items, weather, state.goal, o.name);
+  o.useCount = (o.useCount || 0) + 1;
+  o.lastUsed = date;
+  Store.saveOutfits(state.outfits);
+  const isTomorrow = state.targetDay === 'tomorrow';
+  toast(isTomorrow ? `已安排「${o.name}」为明日穿搭 ✓` : `已记录「${o.name}」为今日穿搭 ✓`);
+  renderSavedOutfits();
+  renderTodayWorn();
+}
+
+/* 新建搭配弹窗的衣物多选网格 */
+function renderOutfitPickGrid(picks) {
+  const grid = $('#outfitPickGrid');
+  const list = state.clothes.slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  grid.innerHTML = list.map(c => `
+    <div class="pick-item ${picks.has(c.id) ? 'picked' : ''}" data-id="${c.id}">
+      ${c.image ? `<img src="${c.image}" alt="">` : '<div style="aspect-ratio:1;background:#f2f3f6;border-radius:8px"></div>'}
+      <p>${esc(c.name)}</p>
+    </div>`).join('');
+}
+
+/* 通用：记录一套穿搭到目标日期（日记+穿着统计） */
+function recordOutfit(items, weather, goal, source) {
+  const list = Store.diary();
+  const date = targetDateStr();
+  const rest = list.filter(d => d.date !== date);
+  rest.unshift({
+    date,
+    goal: goal || '日常',
+    weather: { condition: weather.condition, temperature: weather.temperature, feelsLike: weather.feelsLike },
+    items: items.map(it => ({ id: it.id, name: it.name, cat: it.cat, image: it.image, why: source ? '固定搭配' : it.why })),
+    profile: '',
+  });
+  Store.saveDiary(rest);
+  state.diary = rest;
+
+  const wornIds = items.map(it => it.id);
+  state.clothes = state.clothes.map(c => wornIds.includes(c.id) ? Object.assign({}, c, { wearCount: (c.wearCount || 0) + 1, lastWorn: date }) : c);
+  Store.saveClothes(state.clothes);
+}
+
 function renderDiary() {
   const list = state.diary.slice().sort((a, b) => b.date.localeCompare(a.date));
   const box = $('#diaryList');
@@ -1180,7 +1329,7 @@ function renderSettings() {
 function exportData() {
   const data = {
     app: 'AI衣柜', version: 1, exportedAt: new Date().toISOString(),
-    clothes: Store.clothes(), diary: Store.diary(), settings: Store.settings(),
+    clothes: Store.clothes(), diary: Store.diary(), outfits: Store.outfits(), settings: Store.settings(),
   };
   const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -1199,9 +1348,11 @@ function importData(file) {
       if (data.app !== 'AI衣柜' || !Array.isArray(data.clothes)) throw new Error('格式错误');
       Store.saveClothes(data.clothes);
       Store.saveDiary(data.diary || []);
+      Store.saveOutfits(data.outfits || []);
       if (data.settings) Store.saveSettings(Object.assign({}, state.settings, data.settings));
       state.clothes = Store.clothes();
       state.diary = Store.diary();
+      state.outfits = Store.outfits();
       state.settings = Store.settings();
       renderAll();
       toast('导入成功 ✓');
@@ -1268,7 +1419,7 @@ async function buildSyncPayload() {
   return {
     app: 'AI衣柜', version: 1,
     syncedAt: new Date().toISOString(),
-    clothes, diary, settings: state.settings,
+    clothes, diary, outfits: state.outfits, settings: state.settings,
   };
 }
 
@@ -1321,7 +1472,7 @@ async function backupToCloud() {
 
   Store.set('syncMeta', {
     lastSyncAt: payload.syncedAt,
-    sizeKB, count: payload.clothes.length + payload.diary.length,
+    sizeKB, count: payload.clothes.length + payload.diary.length + payload.outfits.length,
   });
   return { sizeKB };
 }
@@ -1345,12 +1496,15 @@ async function restoreFromCloud() {
   }));
   Store.saveClothes(clothes);
   Store.saveDiary(diary);
+  Store.saveOutfits(data.outfits || []);
+  if (data.outfits) state.outfits = Store.outfits();
   if (data.settings) Store.saveSettings(Object.assign({}, data.settings, { city: data.settings.city || null }));
   state.clothes = Store.clothes();
   state.diary = Store.diary();
+  state.outfits = Store.outfits();
   state.settings = Store.settings();
   renderAll();
-  return { count: clothes.length, diaryCount: diary.length, syncedAt: data.syncedAt };
+  return { count: clothes.length, diaryCount: diary.length, outfitCount: (data.outfits || []).length, syncedAt: data.syncedAt };
 }
 
 function renderSyncStatus(cls, text) {
@@ -1366,18 +1520,19 @@ function switchPage(page) {
   if (target) target.classList.add('active');
   $$('.tab').forEach(t => t.classList.toggle('active', t.dataset.page === page));
   if (page === 'wardrobe') renderWardrobe();
-  if (page === 'diary') renderDiary();
+  if (page === 'outfits') renderOutfitsPage();
   if (page === 'settings') renderSettings();
 }
 
 function renderAll() {
-  renderWardrobe(); renderDiary(); renderSettings();
+  renderWardrobe(); renderOutfitsPage(); renderSettings();
 }
 
 /* ================= 初始化 ================= */
 function init() {
   state.clothes = Store.clothes();
   state.diary = Store.diary();
+  state.outfits = Store.outfits();
   state.settings = Store.settings();
 
   // 顶部日期
@@ -1708,6 +1863,47 @@ function init() {
     renderWardrobe();
   });
 
+  // 搭配页子Tab切换（固定搭配 | 穿搭日记）
+  $('#outfitTabs').addEventListener('click', ev => {
+    const ch = ev.target.closest('.chip');
+    if (!ch) return;
+    state.outfitView = ch.dataset.view;
+    renderOutfitsPage();
+  });
+
+  // 新建固定搭配（从衣柜多选）
+  let outfitPicks = new Set();
+  $('#btnNewOutfit').onclick = () => {
+    if (!state.clothes.length) { toast('衣柜还是空的，先添加衣服'); switchPage('wardrobe'); return; }
+    outfitPicks = new Set();
+    $('#outfitName').value = '我的搭配 ' + (state.outfits.length + 1);
+    renderOutfitPickGrid(outfitPicks);
+    $('#outfitModal').classList.add('open');
+  };
+  $('#outfitPickGrid').addEventListener('click', ev => {
+    const item = ev.target.closest('.pick-item');
+    if (!item) return;
+    const id = Number(item.dataset.id);
+    if (outfitPicks.has(id)) outfitPicks.delete(id); else outfitPicks.add(id);
+    item.classList.toggle('picked', outfitPicks.has(id));
+  });
+  $('#btnCancelOutfit').onclick = () => $('#outfitModal').classList.remove('open');
+  $('#outfitModal').addEventListener('click', ev => {
+    if (ev.target === $('#outfitModal')) $('#outfitModal').classList.remove('open');
+  });
+  $('#btnSaveOutfit').onclick = () => {
+    if (outfitPicks.size < 2) { toast('至少选 2 件组成一套'); return; }
+    const name = $('#outfitName').value.trim() || ('我的搭配 ' + (state.outfits.length + 1));
+    const items = state.clothes.filter(c => outfitPicks.has(c.id))
+      .map(c => ({ id: c.id, name: c.name, cat: c.cat, image: c.image }));
+    state.outfits.unshift({ id: Date.now(), name, items, createdAt: Date.now(), useCount: 0, lastUsed: '' });
+    Store.saveOutfits(state.outfits);
+    $('#outfitModal').classList.remove('open');
+    state.outfitView = 'saved';
+    renderOutfitsPage();
+    toast(`固定搭配「${name}」已保存 ⭐`);
+  };
+
   // 城市搜索
   $('#btnCitySearch').onclick = doCitySearch;
   $('#cityInput').addEventListener('keydown', ev => { if (ev.key === 'Enter') doCitySearch(); });
@@ -1750,7 +1946,8 @@ function init() {
     if (!confirm('确定清空所有衣物和日记吗？此操作不可恢复！')) return;
     localStorage.removeItem('aiwardrobe_clothes');
     localStorage.removeItem('aiwardrobe_diary');
-    state.clothes = []; state.diary = [];
+    localStorage.removeItem('aiwardrobe_outfits');
+    state.clothes = []; state.diary = []; state.outfits = [];
     renderAll();
     toast('已清空');
   };
@@ -1788,7 +1985,7 @@ function init() {
     renderSyncStatus('busy', '正在从云端拉取…');
     try {
       const r = await restoreFromCloud();
-      renderSyncStatus('ok', `✓ 已恢复 ${r.count} 件衣物 · ${r.diaryCount} 条日记（云端备份于 ${new Date(r.syncedAt).toLocaleString('zh-CN')}）`);
+      renderSyncStatus('ok', `✓ 已恢复 ${r.count} 件衣物 · ${r.outfitCount} 套搭配 · ${r.diaryCount} 条日记（云端备份于 ${new Date(r.syncedAt).toLocaleString('zh-CN')}）`);
       toast('云端恢复成功 ✓');
     } catch (e) {
       console.warn('恢复失败:', e);
@@ -1801,7 +1998,7 @@ function init() {
 
   // 初始渲染
   renderWardrobe();
-  renderDiary();
+  renderOutfitsPage();
   renderSettings();
   updateDayUI();
   renderTodayWorn();
