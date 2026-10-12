@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f6f7f9">
+<title>AI 衣柜 · 天气穿搭助手</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%234fc3a1'/%3E%3Ctext x='50' y='68' font-size='52' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='bold'%3E%E8%A1%A3%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+<link rel="manifest" href="manifest.webmanifest">
+</head>
+<body>
+<div class="app">
+
+  <!-- ============ 顶部栏 ============ -->
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <div class="brand-logo">衣</div>
+        <div>
+          <div class="brand-name">AI 衣柜</div>
+          <div class="brand-sub" id="topDate"></div>
+        </div>
+      </div>
+      <button class="icon-btn" id="btnSettingsJump" title="设置">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- ============ 页面容器 ============ -->
+  <main class="main">
+
+    <!-- ---------- 首页 / 推荐 ---------- -->
+    <section class="page active" id="page-home">
+      <!-- 天气卡 -->
+      <div class="weather-card" id="weatherCard">
+        <div class="weather-left">
+          <div class="weather-loc" id="weatherLoc">加载中…</div>
+          <div class="weather-temp" id="weatherTemp">--°</div>
+          <div class="weather-sub" id="weatherSub">正在获取天气</div>
+        </div>
+        <div class="weather-right" id="weatherIcon">🌤️</div>
+      </div>
+
+      <!-- 目标场景 -->
+      <div class="section">
+        <div class="section-title">今天要去做什么？</div>
+        <div class="chips" id="goalChips">
+          <button class="chip active" data-goal="日常">日常出街</button>
+          <button class="chip" data-goal="通勤">通勤上班</button>
+          <button class="chip" data-goal="运动">运动健身</button>
+          <button class="chip" data-goal="约会">约会聚会</button>
+          <button class="chip" data-goal="正式">面试正式</button>
+          <button class="chip" data-goal="旅行">旅行出游</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <button class="btn-primary btn-big" id="btnGenerate">
+          <span class="spark">✨</span> 生成今日搭配
+        </button>
+        <div class="hint-text">会根据今天的天气和你的衣柜，生成 3 套搭配方案</div>
+      </div>
+
+      <!-- 推荐结果 -->
+      <div id="recoResult"></div>
+    </section>
+
+    <!-- ---------- 衣柜 ---------- -->
+    <section class="page" id="page-wardrobe">
+      <div class="wardrobe-head">
+        <button class="btn-primary btn-add" id="btnAddCloth">＋ 添加衣物</button>
+      </div>
+      <div class="chips wardrobe-tabs" id="wardrobeTabs">
+        <button class="chip active" data-cat="all">全部</button>
+        <button class="chip" data-cat="top">上装</button>
+        <button class="chip" data-cat="bottom">下装</button>
+        <button class="chip" data-cat="outer">外套</button>
+        <button class="chip" data-cat="shoes">鞋履</button>
+        <button class="chip" data-cat="accessory">配饰</button>
+      </div>
+      <div class="cloth-grid" id="clothGrid"></div>
+      <div class="empty-tip" id="wardrobeEmpty">
+        <div class="empty-icon">🧺</div>
+        <p>衣柜还是空的</p>
+        <p class="empty-sub">点击「添加衣物」，把衣服拍进来<br>之后就能每天自动帮你搭配啦</p>
+      </div>
+    </section>
+
+    <!-- ---------- 日记 ---------- -->
+    <section class="page" id="page-diary">
+      <div class="section-title">穿搭日记</div>
+      <div class="empty-tip" id="diaryEmpty">
+        <div class="empty-icon">📖</div>
+        <p>还没有穿搭记录</p>
+        <p class="sub-t">在「推荐」里选好今天穿什么，就会自动记在这里</p>
+      </div>
+      <div id="diaryList"></div>
+    </section>
+
+    <!-- ---------- 设置 ---------- -->
+    <section class="page" id="page-settings">
+      <div class="section-title">天气与城市</div>
+      <div class="card">
+        <div class="field">
+          <label>我的城市</label>
+          <div class="city-search">
+            <input type="text" id="cityInput" placeholder="输入城市名，如：上海">
+            <button class="btn-mini" id="btnCitySearch">搜索</button>
+          </div>
+          <div class="city-results" id="cityResults"></div>
+          <div class="field-note" id="cityNote">天气来自 Open-Meteo 免费接口，无需注册</div>
+        </div>
+      </div>
+
+      <div class="section-title">搭配偏好</div>
+      <div class="card">
+        <div class="field">
+          <label>偏爱的颜色（优先推荐）</label>
+          <div class="chips" id="favColorChips"></div>
+        </div>
+        <div class="field">
+          <label>不想穿的颜色（尽量避开）</label>
+          <div class="chips" id="avoidColorChips"></div>
+        </div>
+        <div class="field">
+          <label>偏爱的风格</label>
+          <div class="chips" id="favStyleChips"></div>
+        </div>
+      </div>
+
+      <div class="section-title">数据</div>
+      <div class="card">
+        <div class="field-note">所有数据只保存在你自己手机/电脑的浏览器里，不会上传。换设备时请手动导出再导入。</div>
+        <div class="row2">
+          <button class="btn-secondary" id="btnExport">导出备份</button>
+          <button class="btn-secondary" id="btnImport">导入备份</button>
+        </div>
+        <div class="row2">
+          <button class="btn-danger" id="btnWipe">清空所有数据</button>
+        </div>
+      </div>
+
+      <div class="section-title">关于</div>
+      <div class="card about-card">
+        <p>AI 衣柜 · 天气穿搭助手</p>
+        <p class="field-note">基于开源项目 <b>leoz9/AIWardrobe</b>（MIT 协议）改造的纯网页版，无需服务器、无需 API Key，可部署到 GitHub Pages 或打包成 App。</p>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ============ 底部导航 ============ -->
+  <nav class="tabbar">
+    <button class="tab active" data-page="home">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/><path d="M9 20v-6h6v6"/></svg>
+      <span>推荐</span>
+    </button>
+    <button class="tab" data-page="wardrobe">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v3H3z"/><path d="M3 10v9a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-9"/><path d="M8 7v2"/><path d="M12 7v2"/><path d="M16 7v2"/></svg>
+      <span>衣柜</span>
+    </button>
+    <button class="tab" data-page="diary">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+      <span>日记</span>
+    </button>
+    <button class="tab" data-page="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <span>设置</span>
+    </button>
+  </nav>
+
+  <!-- ============ 添加/编辑衣物弹窗 ============ -->
+  <div class="modal-mask" id="clothModal">
+    <div class="modal">
+      <div class="modal-title" id="clothModalTitle">添加衣物</div>
+
+      <div class="photo-picker" id="photoPicker">
+        <input type="file" id="fileInput" accept="image/*" hidden>
+        <div class="photo-preview" id="photoPreview">
+          <div class="photo-placeholder">📷<br><span>拍照或上传</span></div>
+        </div>
+      </div>
+      <div class="cut-status" id="cutStatus"></div>
+
+      <div class="field">
+        <label>名称</label>
+        <input type="text" id="clothName" placeholder="如：白色短袖T恤">
+      </div>
+
+      <div class="field">
+        <label>类别</label>
+        <div class="chips" id="catChips">
+          <button class="chip active" data-cat="top">上装</button>
+          <button class="chip" data-cat="bottom">下装</button>
+          <button class="chip" data-cat="outer">外套</button>
+          <button class="chip" data-cat="shoes">鞋履</button>
+          <button class="chip" data-cat="accessory">配饰</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>颜色</label>
+        <div class="chips" id="colorChips">
+          <button class="chip" data-color="黑" style="border-left:3px solid #3a3a40">黑</button>
+          <button class="chip" data-color="白" style="border-left:3px solid #f0f0f2">白</button>
+          <button class="chip" data-color="灰" style="border-left:3px solid #9a9a9e">灰</button>
+          <button class="chip" data-color="红" style="border-left:3px solid #d9534f">红</button>
+          <button class="chip" data-color="橙" style="border-left:3px solid #e08a3c">橙</button>
+          <button class="chip" data-color="黄" style="border-left:3px solid #e6c84c">黄</button>
+          <button class="chip" data-color="绿" style="border-left:3px solid #58a06b">绿</button>
+          <button class="chip" data-color="蓝" style="border-left:3px solid #4a7fb5">蓝</button>
+          <button class="chip" data-color="紫" style="border-left:3px solid #8e6bb5">紫</button>
+          <button class="chip" data-color="粉" style="border-left:3px solid #f09ab3">粉</button>
+          <button class="chip" data-color="棕" style="border-left:3px solid #8a6a52">棕</button>
+          <button class="chip" data-color="牛仔" style="border-left:3px solid #5b7ea6">牛仔</button>
+          <button class="chip" data-color="多色" style="border-left:3px solid #c9c9d2">多色</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>适合季节（可多选）</label>
+        <div class="chips" id="seasonChips">
+          <button class="chip" data-season="春">春</button>
+          <button class="chip" data-season="夏">夏</button>
+          <button class="chip" data-season="秋">秋</button>
+          <button class="chip" data-season="冬">冬</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>风格（可多选）</label>
+        <div class="chips" id="styleChips">
+          <button class="chip" data-style="休闲">休闲</button>
+          <button class="chip" data-style="简约">简约</button>
+          <button class="chip" data-style="通勤">通勤</button>
+          <button class="chip" data-style="正式">正式</button>
+          <button class="chip" data-style="运动">运动</button>
+          <button class="chip" data-style="街头">街头</button>
+          <button class="chip" data-style="甜美">甜美</button>
+          <button class="chip" data-style="复古">复古</button>
+          <button class="chip" data-style="户外">户外</button>
+          <button class="chip" data-style="旅行">旅行</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>厚薄</label>
+        <div class="chips" id="thickChips">
+          <button class="chip" data-thick="1">轻薄</button>
+          <button class="chip active" data-thick="2">适中</button>
+          <button class="chip" data-thick="3">厚重</button>
+        </div>
+      </div>
+
+      <div class="modal-btns">
+        <button class="btn-secondary" id="btnDeleteCloth" style="display:none">删除</button>
+        <button class="btn-primary flex1" id="btnSaveCloth">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 隐藏文件输入：导入备份 -->
+  <input type="file" id="importFile" accept="application/json" hidden>
+
+</div>
+<script src="app.js"></script>
+</body>
+</html>
