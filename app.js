@@ -1038,6 +1038,20 @@ function renderSettings() {
     ? `当前城市：${s.city.name}${s.city.admin1 ? '（' + s.city.admin1 + '）' : ''} · 天气来自 Open-Meteo 免费接口`
     : '天气来自 Open-Meteo 免费接口，无需注册';
 
+  // 云端同步状态回显
+  const st2 = $('#syncTokenInput');
+  if (st2 && document.activeElement !== st2) st2.value = getSyncToken();
+  const meta = getSyncMeta();
+  const stEl = $('#syncStatus');
+  if (stEl && !stEl.className.includes('busy')) {
+    if (meta.lastSyncAt) {
+      const d = new Date(meta.lastSyncAt);
+      renderSyncStatus('ok', `✓ 上次备份：${d.toLocaleString('zh-CN')} · ${meta.sizeKB || '?'} KB · ${meta.count || 0} 条数据`);
+    } else {
+      renderSyncStatus('', getSyncToken() ? 'Token 已保存，尚未备份' : '尚未同步');
+    }
+  }
+
   // 绑定颜色/风格选择
   $$('#favColorChips .chip').forEach(ch => ch.onclick = () => {
     ch.classList.toggle('active');
@@ -1088,6 +1102,155 @@ function importData(file) {
     } catch { toast('备份文件格式不正确'); }
   };
   reader.readAsText(file);
+}
+
+/* ================= 云端同步（GitHub，离线优先 + 手动同步） ================= */
+const SYNC_REPO = 'humphrey688/ai-wardrobe';
+const SYNC_FILE = 'cloud-data.json';
+const SYNC_API = 'https://api.github.com';
+
+function getSyncToken() { return Store.get('syncToken', ''); }
+function getSyncMeta() { return Store.get('syncMeta', {}); }
+
+function utf8ToB64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+function b64ToUtf8(b64) {
+  const bin = atob(String(b64).replace(/\s/g, ''));
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+/* 同步用瘦身图（320px PNG，保留透明）控制云端体积 */
+async function shrinkImage(dataUrl, maxSize = 320) {
+  if (!dataUrl || !dataUrl.startsWith('data:image')) return dataUrl || '';
+  try {
+    if (dataUrl.length < 100 * 1024) return dataUrl; // 已够小
+    const img = await loadImageEl(dataUrl);
+    const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(img.width * scale));
+    c.height = Math.max(1, Math.round(img.height * scale));
+    const ctx = c.getContext('2d');
+    ctx.drawImage(img, 0, 0, c.width, c.height);
+    const out = c.toDataURL('image/png');
+    return out.length < dataUrl.length ? out : dataUrl;
+  } catch { return dataUrl; }
+}
+
+/* 组装同步 payload（日记图片按 id 关联衣物，不重复存） */
+async function buildSyncPayload() {
+  const clothes = await Promise.all(state.clothes.map(async c => {
+    const copy = Object.assign({}, c);
+    copy.image = await shrinkImage(c.image);
+    return copy;
+  }));
+  const diary = state.diary.map(d => Object.assign({}, d, {
+    items: (d.items || []).map(it => {
+      const rest = Object.assign({}, it);
+      delete rest.image; // 恢复时按 id 从衣物补
+      return rest;
+    }),
+  }));
+  return {
+    app: 'AI衣柜', version: 1,
+    syncedAt: new Date().toISOString(),
+    clothes, diary, settings: state.settings,
+  };
+}
+
+async function ghApi(method, path, body, token, timeoutMs = 60000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(SYNC_API + path, {
+      method, signal: ctrl.signal,
+      headers: {
+        Authorization: 'Bearer ' + token,
+        Accept: 'application/vnd.github+json',
+        'Content-Type': 'application/json',
+        'User-Agent': 'ai-wardrobe-sync',
+      },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!res.ok) {
+      const t = await res.text().catch(() => '');
+      let msg = 'HTTP ' + res.status;
+      if (res.status === 401) msg += '：Token 无效';
+      else if (res.status === 403) msg += '：Token 无仓库写入权限';
+      else if (res.status === 404) msg += '：文件不存在或仓库不对';
+      throw new Error(msg + ' ' + t.slice(0, 100));
+    }
+    return res.status === 200 ? res.json() : null;
+  } finally { clearTimeout(timer); }
+}
+
+async function backupToCloud() {
+  const token = getSyncToken();
+  if (!token) throw new Error('请先填写 GitHub Token');
+  const payload = await buildSyncPayload();
+  const json = JSON.stringify(payload);
+  const sizeKB = Math.round(json.length / 1024);
+
+  // 拿已存在文件的 sha（更新需要）
+  let sha = null;
+  try {
+    const cur = await ghApi('GET', `/repos/${SYNC_REPO}/contents/${SYNC_FILE}?ref=main`, null, token, 20000);
+    if (cur && cur.sha) sha = cur.sha;
+  } catch (e) { /* 404 = 首次备份，无 sha */ }
+
+  await ghApi('PUT', `/repos/${SYNC_REPO}/contents/${SYNC_FILE}`, {
+    message: 'AI衣柜云端备份 · ' + new Date().toLocaleString('zh-CN'),
+    content: utf8ToB64(json),
+    branch: 'main',
+    sha: sha || undefined,
+  }, token);
+
+  Store.set('syncMeta', {
+    lastSyncAt: payload.syncedAt,
+    sizeKB, count: payload.clothes.length + payload.diary.length,
+  });
+  return { sizeKB };
+}
+
+async function restoreFromCloud() {
+  const token = getSyncToken();
+  if (!token) throw new Error('请先填写 GitHub Token');
+  const cur = await ghApi('GET', `/repos/${SYNC_REPO}/contents/${SYNC_FILE}?ref=main`, null, token, 30000);
+  if (!cur || !cur.content) throw new Error('云端还没有备份，请先「备份到云端」');
+  const data = JSON.parse(b64ToUtf8(cur.content));
+  if (data.app !== 'AI衣柜' || !Array.isArray(data.clothes)) throw new Error('云端数据格式不正确');
+
+  // 恢复：衣物、日记（按 id 补图）、设置
+  const clothes = data.clothes || [];
+  const idMap = {};
+  clothes.forEach(c => { idMap[c.id] = c.image || ''; });
+  const diary = (data.diary || []).map(d => Object.assign({}, d, {
+    items: (d.items || []).map(it => Object.assign({}, it, {
+      image: it.image || idMap[it.id] || '',
+    })),
+  }));
+  Store.saveClothes(clothes);
+  Store.saveDiary(diary);
+  if (data.settings) Store.saveSettings(Object.assign({}, data.settings, { city: data.settings.city || null }));
+  state.clothes = Store.clothes();
+  state.diary = Store.diary();
+  state.settings = Store.settings();
+  renderAll();
+  return { count: clothes.length, diaryCount: diary.length, syncedAt: data.syncedAt };
+}
+
+function renderSyncStatus(cls, text) {
+  const el = $('#syncStatus');
+  el.className = 'sync-status' + (cls ? ' ' + cls : '');
+  el.textContent = text;
 }
 
 /* ================= 页面切换 ================= */
@@ -1471,6 +1634,50 @@ function init() {
     state.clothes = []; state.diary = [];
     renderAll();
     toast('已清空');
+  };
+
+  // 云端同步（GitHub）
+  $('#syncTokenInput').onchange = () => {
+    Store.set('syncToken', $('#syncTokenInput').value.trim());
+    renderSyncStatus('', $('#syncTokenInput').value.trim() ? 'Token 已保存 ✓ 点击「备份到云端」试试' : '尚未同步');
+    toast('Token 已保存');
+  };
+  $('#btnSyncUp').onclick = async () => {
+    if (!getSyncToken()) { renderSyncStatus('err', '请先填写 GitHub Token'); toast('请先填写 Token'); return; }
+    const btn = $('#btnSyncUp');
+    btn.disabled = true;
+    renderSyncStatus('busy', '正在备份到云端…（衣物较多时需等待）');
+    try {
+      const { sizeKB } = await backupToCloud();
+      const t = new Date();
+      const meta = getSyncMeta();
+      renderSyncStatus('ok', `✓ 已备份 ${sizeKB} KB · ${t.getHours()}:${fmt(t.getMinutes())}（衣物+日记共 ${meta.count || ''} 条）`);
+      toast('云端备份成功 ✓');
+    } catch (e) {
+      console.warn('备份失败:', e);
+      renderSyncStatus('err', '✗ 备份失败：' + (e.name === 'AbortError' ? '网络超时，请重试' : e.message) + '（点击按钮重试）');
+      toast('备份失败，可重试');
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  $('#btnSyncDown').onclick = async () => {
+    if (!getSyncToken()) { renderSyncStatus('err', '请先填写 GitHub Token'); toast('请先填写 Token'); return; }
+    if (!confirm('将用云端数据覆盖本机当前数据，确定恢复？')) return;
+    const btn = $('#btnSyncDown');
+    btn.disabled = true;
+    renderSyncStatus('busy', '正在从云端拉取…');
+    try {
+      const r = await restoreFromCloud();
+      renderSyncStatus('ok', `✓ 已恢复 ${r.count} 件衣物 · ${r.diaryCount} 条日记（云端备份于 ${new Date(r.syncedAt).toLocaleString('zh-CN')}）`);
+      toast('云端恢复成功 ✓');
+    } catch (e) {
+      console.warn('恢复失败:', e);
+      renderSyncStatus('err', '✗ 恢复失败：' + (e.name === 'AbortError' ? '网络超时，请重试' : e.message));
+      toast('恢复失败，可重试');
+    } finally {
+      btn.disabled = false;
+    }
   };
 
   // 初始渲染

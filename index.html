@@ -132,7 +132,7 @@
 
       <div class="section-title">数据</div>
       <div class="card">
-        <div class="field-note">所有数据只保存在你自己手机/电脑的浏览器里，不会上传。换设备时请手动导出再导入。</div>
+        <div class="field-note">所有数据只保存在你自己手机/电脑的浏览器里，不会上传。换设备时可用云端同步或手动导出再导入。</div>
         <div class="row2">
           <button class="btn-secondary" id="btnExport">导出备份</button>
           <button class="btn-secondary" id="btnImport">导入备份</button>
@@ -140,6 +140,21 @@
         <div class="row2">
           <button class="btn-danger" id="btnWipe">清空所有数据</button>
         </div>
+      </div>
+
+      <div class="section-title">云端同步（GitHub）</div>
+      <div class="card">
+        <div class="field-note">一键把衣物、日记、设置备份到你的 GitHub 仓库（humphrey688/ai-wardrobe），换手机/重装后一键恢复。注意：仓库是公开的（Pages 需要），衣物图片会上传，介意隐私的照片请勿上传。Token 只保存在本机浏览器。</div>
+        <div class="field">
+          <label>GitHub Token</label>
+          <input type="password" id="syncTokenInput" placeholder="ghp_ 或 github_pat_ 开头（需仓库写入权限）" autocomplete="off">
+          <div class="field-note">获取：GitHub → Settings → Developer settings → Personal access tokens，勾选 repo（或 Fine-grained 仅授权 ai-wardrobe 仓库的 Contents 读写）</div>
+        </div>
+        <div class="row2">
+          <button class="btn-primary" id="btnSyncUp" style="background:linear-gradient(135deg,var(--primary),#3db893);border:none;color:#fff;font-weight:600;box-shadow:0 6px 18px rgba(79,198,161,.3)">⬆ 备份到云端</button>
+          <button class="btn-secondary" id="btnSyncDown">⬇ 从云端恢复</button>
+        </div>
+        <div class="sync-status" id="syncStatus">尚未同步</div>
       </div>
 
       <div class="section-title">关于</div>

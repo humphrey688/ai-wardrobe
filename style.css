@@ -261,6 +261,13 @@ body{
 .row2 button{flex:1}
 .about-card p{font-size:14px;font-weight:600;margin-bottom:6px}
 .about-card .field-note{font-weight:400}
+.sync-status{
+  font-size:12px;color:var(--text-2);text-align:center;margin-top:10px;
+  padding:8px 12px;border-radius:10px;background:#f2f4f7;line-height:1.6;
+}
+.sync-status.busy{color:var(--primary);background:var(--primary-soft);font-weight:600}
+.sync-status.ok{color:#2e7d5b;background:var(--primary-soft)}
+.sync-status.err{color:var(--danger);background:var(--accent-soft)}
 
 /* ============ 底部导航 ============ */
 .tabbar{
