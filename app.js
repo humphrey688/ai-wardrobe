@@ -930,8 +930,10 @@ function generateOutfits(goal, weather) {
   const rand = mulberry32(daySeed());
   const { profile, pool } = buildPool(goal, weather, rand);
   const outfits = [];
-  const needOuter = profile.seasons.includes('冬') || profile.seasons.includes('秋');
-  const hotOnly = profile.seasons.length === 1 && profile.seasons[0] === '夏';
+
+  /* 外套按体感温度分档：凉→必备；适中→仅方案A备一件（早晚温差）；热→不推荐 */
+  const t = weather.feelsLike;
+  const outerMode = t <= 14 ? 'required' : (t <= 24 ? 'optional' : 'none');
 
   for (let i = 0; i < 3; i++) {
     const usedIds = new Set();
@@ -940,7 +942,7 @@ function generateOutfits(goal, weather) {
     const top = pickCandidate(pool.top, i, usedIds);
     const bottom = pickCandidate(pool.bottom, i, usedIds);
     let outer = null;
-    if (!hotOnly) outer = pickCandidate(pool.outer, i, usedIds);
+    if (outerMode === 'required' || (outerMode === 'optional' && i === 0)) outer = pickCandidate(pool.outer, i, usedIds);
     const shoes = pickCandidate(pool.shoes, i, usedIds);
     const acc = pickCandidate(pool.accessory, i, usedIds);
 
@@ -948,8 +950,13 @@ function generateOutfits(goal, weather) {
     else o.missing.push('上装');
     if (bottom) { o.items.push({ c: bottom.c, role: '下装', why: bottom.reasons.slice(0, 2).join('、') || '基础搭配' }); usedIds.add(bottom.c.id); }
     else o.missing.push('下装');
-    if (outer) { o.items.push({ c: outer.c, role: '外套', why: outer.reasons.slice(0, 2).join('、') || '基础搭配' }); usedIds.add(outer.c.id); }
-    else if (needOuter) o.missing.push('外套');
+    if (outer) {
+      o.items.push({
+        c: outer.c, role: '外套',
+        why: outerMode === 'optional' ? '早晚凉可备一件，热了脱' : (outer.reasons.slice(0, 2).join('、') || '基础搭配'),
+      });
+      usedIds.add(outer.c.id);
+    } else if (outerMode === 'required') o.missing.push('外套');
     if (shoes) { o.items.push({ c: shoes.c, role: '鞋履', why: shoes.reasons.slice(0, 2).join('、') || '基础搭配' }); usedIds.add(shoes.c.id); }
     else o.missing.push('鞋履');
     if (acc) { o.items.push({ c: acc.c, role: '配饰', why: acc.reasons.slice(0, 2).join('、') || '点缀' }); usedIds.add(acc.c.id); }
@@ -1303,6 +1310,41 @@ function wearSavedOutfit(outfitId) {
   renderTodayWorn();
 }
 
+/* 选衣弹窗（三种模式共用：new 新建固定搭配 / custom 自己挑一身 / diary 修改穿搭记录） */
+let outfitPicks = new Set();
+let outfitModalMode = 'new';
+let diaryEditDate = '';
+
+function openPickModal(mode, date) {
+  if (!state.clothes.length) { toast('衣柜还是空的，先添加衣服'); switchPage('wardrobe'); return; }
+  outfitModalMode = mode;
+  const nameField = $('#outfitNameField');
+  const saveBtn = $('#btnSaveOutfit');
+  if (mode === 'new') {
+    $('#outfitModalTitle').textContent = '新建固定搭配';
+    nameField.style.display = '';
+    $('#outfitName').value = '我的搭配 ' + (state.outfits.length + 1);
+    saveBtn.textContent = '保存搭配';
+    outfitPicks = new Set();
+  } else if (mode === 'custom') {
+    const dayLabel = state.targetDay === 'tomorrow' ? '明天' : '今天';
+    $('#outfitModalTitle').textContent = `自己挑一身（记为${dayLabel}穿搭）`;
+    nameField.style.display = 'none';
+    saveBtn.textContent = '就这样穿 ✓';
+    outfitPicks = new Set();
+  } else {
+    diaryEditDate = date;
+    const entry = state.diary.find(d => d.date === date);
+    if (!entry) return;
+    $('#outfitModalTitle').textContent = `修改穿搭 · ${date}`;
+    nameField.style.display = 'none';
+    saveBtn.textContent = '保存修改 ✓';
+    outfitPicks = new Set(entry.items.map(it => it.id));
+  }
+  renderOutfitPickGrid(outfitPicks);
+  $('#outfitModal').classList.add('open');
+}
+
 /* 新建搭配弹窗的衣物多选网格 */
 function renderOutfitPickGrid(picks) {
   const grid = $('#outfitPickGrid');
@@ -1334,6 +1376,25 @@ function recordOutfit(items, weather, goal, source) {
   Store.saveClothes(state.clothes);
 }
 
+/* 修改/删除穿搭记录后，同步修正衣物的穿着统计 */
+function adjustWearStats(oldItems, newItems, date) {
+  const oldIds = new Set((oldItems || []).map(it => it.id));
+  const newIds = new Set((newItems || []).map(it => it.id));
+  state.clothes = state.clothes.map(c => {
+    let wc = c.wearCount || 0, lw = c.lastWorn || '';
+    if (oldIds.has(c.id) && !newIds.has(c.id)) {
+      wc = Math.max(0, wc - 1);
+      if (lw === date) lw = '';
+    } else if (!oldIds.has(c.id) && newIds.has(c.id)) {
+      wc += 1;
+      lw = date;
+    }
+    if (wc !== (c.wearCount || 0) || lw !== (c.lastWorn || '')) return Object.assign({}, c, { wearCount: wc, lastWorn: lw });
+    return c;
+  });
+  Store.saveClothes(state.clothes);
+}
+
 function renderDiary() {
   const list = state.diary.slice().sort((a, b) => b.date.localeCompare(a.date));
   const box = $('#diaryList');
@@ -1355,8 +1416,32 @@ function renderDiary() {
             <span>${esc(it.name)}</span>
           </div>`).join('')}
       </div>
+      <div class="diary-actions">
+        <button class="btn-secondary" data-editdiary="${d.date}">✏️ 修改</button>
+        <button class="btn-secondary" data-deldiary="${d.date}" style="color:var(--danger)">删除</button>
+      </div>
     </div>`;
   }).join('');
+
+  // 修改：打开选衣弹窗（预选当前这套，增删衣物后保存）
+  $$('#diaryList [data-editdiary]').forEach(btn => {
+    btn.onclick = () => openPickModal('diary', btn.dataset.editdiary);
+  });
+  // 删除
+  $$('#diaryList [data-deldiary]').forEach(btn => {
+    btn.onclick = () => {
+      const date = btn.dataset.deldiary;
+      if (!confirm(`删除 ${date} 的穿搭记录？`)) return;
+      const entry = state.diary.find(x => x.date === date);
+      if (entry) adjustWearStats(entry.items, [], date);
+      state.diary = state.diary.filter(x => x.date !== date);
+      Store.saveDiary(state.diary);
+      renderDiary();
+      renderTodayWorn();
+      renderWardrobe();
+      toast('已删除');
+    };
+  });
 }
 
 /* ================= 渲染：设置 ================= */
@@ -2069,15 +2154,9 @@ function init() {
     renderOutfitsPage();
   });
 
-  // 新建固定搭配（从衣柜多选）
-  let outfitPicks = new Set();
-  $('#btnNewOutfit').onclick = () => {
-    if (!state.clothes.length) { toast('衣柜还是空的，先添加衣服'); switchPage('wardrobe'); return; }
-    outfitPicks = new Set();
-    $('#outfitName').value = '我的搭配 ' + (state.outfits.length + 1);
-    renderOutfitPickGrid(outfitPicks);
-    $('#outfitModal').classList.add('open');
-  };
+  // 新建固定搭配 / 自己挑一身（共用选衣弹窗）
+  $('#btnNewOutfit').onclick = () => openPickModal('new');
+  $('#btnCustomPick').onclick = () => openPickModal('custom');
   $('#outfitPickGrid').addEventListener('click', ev => {
     const item = ev.target.closest('.pick-item');
     if (!item) return;
@@ -2090,6 +2169,38 @@ function init() {
     if (ev.target === $('#outfitModal')) $('#outfitModal').classList.remove('open');
   });
   $('#btnSaveOutfit').onclick = () => {
+    if (outfitModalMode === 'diary') {
+      // 修改穿搭记录：只改衣物清单，日期/天气/场景保留
+      if (!outfitPicks.size) { toast('至少选 1 件'); return; }
+      const entry = state.diary.find(d => d.date === diaryEditDate);
+      if (!entry) { $('#outfitModal').classList.remove('open'); return; }
+      const items = state.clothes.filter(c => outfitPicks.has(c.id))
+        .map(c => ({ id: c.id, name: c.name, cat: c.cat, image: c.image, why: '手动调整' }));
+      adjustWearStats(entry.items, items, diaryEditDate);
+      entry.items = items;
+      Store.saveDiary(state.diary);
+      $('#outfitModal').classList.remove('open');
+      renderDiary();
+      renderTodayWorn();
+      renderWardrobe();
+      toast('穿搭记录已修改 ✓');
+      return;
+    }
+    if (outfitModalMode === 'custom') {
+      // 自己挑一身：记入今天/明天的日记
+      if (outfitPicks.size < 2) { toast('至少选 2 件组成一套'); return; }
+      const weather = weatherForTarget() || { condition: '晴', temperature: 20, feelsLike: 20 };
+      const items = state.clothes.filter(c => outfitPicks.has(c.id))
+        .map(c => ({ id: c.id, name: c.name, cat: c.cat, image: c.image, why: '自己挑的' }));
+      const isTomorrow = state.targetDay === 'tomorrow';
+      recordOutfit(items, weather, state.goal);
+      $('#outfitModal').classList.remove('open');
+      renderTodayWorn();
+      renderRecommendation(weatherForTarget());
+      toast(isTomorrow ? '已记为明日穿搭 ✓ 今晚不用纠结啦' : '已记录今日穿搭 ✓');
+      return;
+    }
+    // new：存为固定搭配
     if (outfitPicks.size < 2) { toast('至少选 2 件组成一套'); return; }
     const name = $('#outfitName').value.trim() || ('我的搭配 ' + (state.outfits.length + 1));
     const items = state.clothes.filter(c => outfitPicks.has(c.id))
