@@ -19,13 +19,16 @@ html,body{height:100%}
 body{
   font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;
   background:var(--bg);color:var(--text);
-  display:flex;justify-content:center;
+  /* align-items:flex-start 关键：flex 默认 stretch 会把 .app 锁死在视口高度，
+     内容溢出容器，padding-bottom 留白被越过 → 底部内容被导航栏挡住 */
+  display:flex;justify-content:center;align-items:flex-start;
   -webkit-font-smoothing:antialiased;
 }
 .app{
   width:100%;max-width:480px;min-height:100vh;
   background:var(--bg);position:relative;
-  /* 底部导航 + 留足余量 + 手机安全区，确保页面最后几行不被挡住 */
+  /* 底部导航留白：先写兼容兑底值，再写增强值——老内核不支持 env() 时整条声明失效，必须用两行声明兑底 */
+  padding-bottom:120px;
   padding-bottom:calc(120px + env(safe-area-inset-bottom));
 }
 /* 桌面端居中显示 */
@@ -46,6 +49,7 @@ body{
   background:rgba(246,247,249,.85);backdrop-filter:blur(14px);
   -webkit-backdrop-filter:blur(14px);
   border-bottom:1px solid var(--line);
+  padding:0 16px 10px;
   padding:env(safe-area-inset-top) 16px 10px;
 }
 .topbar-inner{display:flex;align-items:center;justify-content:space-between;max-width:480px;margin:0 auto}
@@ -125,7 +129,13 @@ body{
 .saved-name{font-size:15px;font-weight:700}
 .saved-meta{font-size:11px;color:var(--text-2);margin-top:2px}
 .saved-items{display:flex;flex-wrap:wrap;gap:8px}
-.saved-items .diary-piece{position:relative}
+.saved-items .diary-piece{
+  position:relative;
+  display:flex;flex-direction:column;align-items:center;gap:4px;
+  background:#fafbfd;border-radius:12px;padding:8px;width:64px;
+}
+.saved-items img{width:48px;height:48px;object-fit:contain;background:#fff;border-radius:8px;border:1px solid var(--line)}
+.saved-items span{font-size:10px;color:var(--text-2);text-align:center;max-width:64px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .saved-actions{display:flex;gap:8px;margin-top:12px}
 .saved-actions .btn-secondary{flex:1;padding:8px;font-size:13px}
 .pick-btn-mini{
@@ -340,6 +350,7 @@ body{
   -webkit-backdrop-filter:blur(16px);
   border-top:1px solid var(--line);
   display:flex;justify-content:space-around;
+  padding:8px 6px 10px;
   padding:8px 6px calc(10px + env(safe-area-inset-bottom));
   z-index:60;
 }
@@ -366,6 +377,7 @@ body{
 .modal{
   background:var(--bg);border-radius:24px 24px 0 0;
   width:100%;max-width:480px;max-height:88vh;overflow-y:auto;
+  padding:20px 18px 24px;
   padding:20px 18px calc(24px + env(safe-area-inset-bottom));
   animation:slideup .28s ease;
 }
