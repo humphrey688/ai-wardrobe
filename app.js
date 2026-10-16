@@ -81,7 +81,13 @@ const Store = {
   },
   set(key, val) {
     try { localStorage.setItem('aiwardrobe_' + key, JSON.stringify(val)); }
-    catch { alert('保存失败：浏览器存储空间可能不足。衣物图片较多时请先在设置里导出备份。'); }
+    catch (e) {
+      const quota = e && (e.name === 'QuotaExceededError' || e.code === 22 || e.code === 1014);
+      console.warn('本地保存失败:', e && e.name, key);
+      alert(quota
+        ? '保存失败：浏览器本地存储已满（上限约 5MB）。重新打开页面会自动瘦身旧图片；若仍提示，请删除部分不再穿的衣物。'
+        : '保存失败：' + ((e && e.message) || e));
+    }
   },
   clothes: () => Store.get('clothes', []),
   saveClothes(list) { Store.set('clothes', list); Store.set('dirty', true); },
@@ -102,6 +108,62 @@ let state = {
   targetDay: 'tomorrow',  // 默认为明天搭配（今晚选好明天的衣服）
   weather: null,          // { today, tomorrow }
 };
+
+/* ================= 存储瘦身（修复本地存储爆满导致保存失败） =================
+ * 根源：抠图成品是带透明通道的 PNG（单张可达数百 KB），且日记/固定搭配每条
+ * 都把图片再复制一份 → 图片存了三遍，很快超过 localStorage 约 5MB 上限。
+ * 方案：① 大 PNG 抠图平铺成白底 JPEG（体积降 70%+，页面图片底色均为白色，视觉不变）
+ *      ② 日记/搭配条目不再内嵌图片，渲染时按 id 从衣柜取（图片只存一份）
+ *      ③ 启动时自动迁移旧数据 */
+function flattenImage(dataUrl, thresholdKB = 100) {
+  return new Promise(resolve => {
+    if (!dataUrl || !dataUrl.startsWith('data:image/png') || dataUrl.length * 3 / 4 < thresholdKB * 1024) return resolve(dataUrl);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth; c.height = img.naturalHeight;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, c.width, c.height);
+        ctx.drawImage(img, 0, 0);
+        const out = c.toDataURL('image/jpeg', 0.85);
+        resolve(out.length < dataUrl.length ? out : dataUrl);
+      } catch { resolve(dataUrl); }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+/* 日记/搭配条目图片按 id 从衣柜解析（条目本身不再存图） */
+function imgOfItem(it) {
+  const c = state.clothes && state.clothes.find(x => x.id === it.id);
+  return (c && c.image) || it.image || '';
+}
+
+const stripItemImages = items => (items || []).map(it => {
+  const r = Object.assign({}, it); delete r.image; return r;
+});
+
+async function migrateStorage() {
+  try {
+    let clothChanged = false;
+    for (const c of state.clothes) {
+      const flat = await flattenImage(c.image);
+      if (flat !== c.image) { c.image = flat; clothChanged = true; }
+    }
+    if (clothChanged) Store.saveClothes(state.clothes);
+    if (state.diary.some(d => (d.items || []).some(it => 'image' in it))) {
+      state.diary = state.diary.map(d => Object.assign({}, d, { items: stripItemImages(d.items) }));
+      Store.saveDiary(state.diary);
+    }
+    if (state.outfits.some(o => (o.items || []).some(it => 'image' in it))) {
+      state.outfits = state.outfits.map(o => Object.assign({}, o, { items: stripItemImages(o.items) }));
+      Store.saveOutfits(state.outfits);
+    }
+  } catch (e) { console.warn('存储迁移失败（不影响使用）:', e); }
+}
 
 /* ================= 天气（Open-Meteo） ================= */
 function mapWeatherCode(code, isDay) {
@@ -1078,7 +1140,7 @@ function missingHint(missing) {
 function pickOutfit(idx, outfits, weather) {
   const o = outfits[idx];
   const isTomorrow = state.targetDay === 'tomorrow';
-  recordOutfit(o.items.map(it => ({ id: it.c.id, name: it.c.name, cat: it.c.cat, image: it.c.image, why: it.why })), weather, o.goal);
+  recordOutfit(o.items.map(it => ({ id: it.c.id, name: it.c.name, cat: it.c.cat, why: it.why })), weather, o.goal);
   renderRecommendation(weather);
   renderTodayWorn();
   toast(isTomorrow ? '已记为明日穿搭 ✓ 今晚不用纠结啦' : '已记录今日穿搭 ✓');
@@ -1095,7 +1157,7 @@ function saveOutfitFromReco(idx, outfits) {
   state.outfits.unshift({
     id: Date.now(),
     name: finalName,
-    items: o.items.map(it => ({ id: it.c.id, name: it.c.name, cat: it.c.cat, image: it.c.image })),
+    items: o.items.map(it => ({ id: it.c.id, name: it.c.name, cat: it.c.cat })),
     createdAt: Date.now(), useCount: 0, lastUsed: '',
   });
   Store.saveOutfits(state.outfits);
@@ -1264,7 +1326,7 @@ function renderSavedOutfits() {
       <div class="saved-items">
         ${o.items.map(it => `
           <div class="diary-piece">
-            ${it.image ? `<img src="${it.image}" alt="">` : ''}
+            ${imgOfItem(it) ? `<img src="${imgOfItem(it)}" alt="">` : ''}
             <span>${esc(it.name)}</span>
           </div>`).join('')}
       </div>
@@ -1365,7 +1427,7 @@ function recordOutfit(items, weather, goal, source) {
     date,
     goal: goal || '日常',
     weather: { condition: weather.condition, temperature: weather.temperature, feelsLike: weather.feelsLike },
-    items: items.map(it => ({ id: it.id, name: it.name, cat: it.cat, image: it.image, why: source ? '固定搭配' : it.why })),
+    items: items.map(it => ({ id: it.id, name: it.name, cat: it.cat, why: source ? '固定搭配' : it.why })),
     profile: '',
   });
   Store.saveDiary(rest);
@@ -1412,7 +1474,7 @@ function renderDiary() {
       <div class="diary-items">
         ${d.items.map(it => `
           <div class="diary-piece">
-            ${it.image ? `<img src="${it.image}" alt="">` : ''}
+            ${imgOfItem(it) ? `<img src="${imgOfItem(it)}" alt="">` : ''}
             <span>${esc(it.name)}</span>
           </div>`).join('')}
       </div>
@@ -1511,13 +1573,20 @@ function exportData() {
 
 function importData(file) {
   const reader = new FileReader();
-  reader.onload = () => {
+  reader.onload = async () => {
     try {
       const data = JSON.parse(reader.result);
       if (data.app !== 'AI衣柜' || !Array.isArray(data.clothes)) throw new Error('格式错误');
-      Store.saveClothes(data.clothes);
-      Store.saveDiary(data.diary || []);
-      Store.saveOutfits(data.outfits || []);
+      // 导入即瘦身：大图平铺 + 条目去图（旧备份里内嵌的图片不再重复存储）
+      const clothes = [];
+      for (const c of data.clothes) {
+        const copy = Object.assign({}, c);
+        copy.image = await flattenImage(copy.image);
+        clothes.push(copy);
+      }
+      Store.saveClothes(clothes);
+      Store.saveDiary((data.diary || []).map(d => Object.assign({}, d, { items: stripItemImages(d.items) })));
+      Store.saveOutfits((data.outfits || []).map(o => Object.assign({}, o, { items: stripItemImages(o.items) })));
       if (data.settings) Store.saveSettings(Object.assign({}, state.settings, data.settings));
       state.clothes = Store.clothes();
       state.diary = Store.diary();
@@ -1668,24 +1737,24 @@ async function restoreFromCloud() {
   if (!cur || !cur.content) throw new Error('云端还没有备份，请先「备份到云端」');
   const data = JSON.parse(b64ToUtf8(cur.content));
   if (data.app !== 'AI衣柜' || !Array.isArray(data.clothes)) throw new Error('云端数据格式不正确');
-  const stats = applyCloudPayload(data);
+  const stats = await applyCloudPayload(data);
   Store.set('dirty', false);
   return Object.assign(stats, { syncedAt: data.syncedAt });
 }
 
-/* 把云端数据应用到本地（衣物/日记补图/固定搭配/设置），返回统计 */
-function applyCloudPayload(data) {
-  const clothes = data.clothes || [];
-  const idMap = {};
-  clothes.forEach(c => { idMap[c.id] = c.image || ''; });
-  const diary = (data.diary || []).map(d => Object.assign({}, d, {
-    items: (d.items || []).map(it => Object.assign({}, it, {
-      image: it.image || idMap[it.id] || '',
-    })),
-  }));
+/* 把云端数据应用到本地（导入即瘦身：大图平铺、条目不存图），返回统计 */
+async function applyCloudPayload(data) {
+  const clothes = [];
+  for (const c of (data.clothes || [])) {
+    const copy = Object.assign({}, c);
+    copy.image = await flattenImage(copy.image);
+    clothes.push(copy);
+  }
+  const diary = (data.diary || []).map(d => Object.assign({}, d, { items: stripItemImages(d.items) }));
+  const outfits = (data.outfits || []).map(o => Object.assign({}, o, { items: stripItemImages(o.items) }));
   Store.saveClothes(clothes);
   Store.saveDiary(diary);
-  Store.saveOutfits(data.outfits || []);
+  Store.saveOutfits(outfits);
   if (data.settings) Store.saveSettings(Object.assign({}, data.settings, { city: data.settings.city || null }));
   state.clothes = Store.clothes();
   state.diary = Store.diary();
@@ -1695,7 +1764,7 @@ function applyCloudPayload(data) {
   Store.set('syncMeta', Object.assign({}, meta, { lastSyncAt: data.syncedAt }));
   renderAll();
   renderTodayWorn();
-  return { count: clothes.length, diaryCount: diary.length, outfitCount: (data.outfits || []).length };
+  return { count: clothes.length, diaryCount: diary.length, outfitCount: outfits.length };
 }
 
 /* 公开拉取云端数据（无需 Token，公开仓库可直接读；no-store 保证最新） */
@@ -1731,15 +1800,15 @@ async function checkCloudUpdate() {
 
   if (localEmpty) {
     // 访客或新设备：自动载入云端衣柜
-    const stats = applyCloudPayload(data);
+    const stats = await applyCloudPayload(data);
     renderCloudBar('loaded', `☁ 已载入共享衣柜：${stats.count} 件衣物 · ${stats.outfitCount} 套搭配（备份于 ${new Date(data.syncedAt).toLocaleString('zh-CN')}）`);
     toast('已同步云端衣柜 ✓');
     return;
   }
   if (cloudNewer) {
     // 本地有数据但云端更新：提示载入
-    renderCloudBar('update', `☁ 云端衣柜有更新（${new Date(data.syncedAt).toLocaleString('zh-CN')}）`, () => {
-      applyCloudPayload(data);
+    renderCloudBar('update', `☁ 云端衣柜有更新（${new Date(data.syncedAt).toLocaleString('zh-CN')}）`, async () => {
+      await applyCloudPayload(data);
       Store.set('dirty', false);
       renderCloudBar('loaded', '☁ 已更新到云端最新版本 ✓');
       toast('已载入云端最新衣柜 ✓');
@@ -1807,7 +1876,7 @@ function renderAll() {
 }
 
 /* ================= 初始化 ================= */
-function init() {
+async function init() {
   // Service Worker：缓存 /libs/ 模型与运行时（约 28MB，内容不变），下载一次永久生效，页面更新不受影响
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || ['localhost', '127.0.0.1'].includes(location.hostname))) {
     navigator.serviceWorker.register('./sw.js').catch(err => console.warn('SW 注册失败:', err));
@@ -1817,6 +1886,9 @@ function init() {
   state.diary = Store.diary();
   state.outfits = Store.outfits();
   state.settings = Store.settings();
+
+  // 存储瘦身迁移：旧数据大图平铺、日记/搭配去内嵌图（修复存储爆满导致保存失败）
+  await migrateStorage();
 
   // 顶部日期
   $('#topDate').textContent = dateCN();
@@ -2067,7 +2139,7 @@ function init() {
   });
 
   // 保存衣物（多件队列：保存后自动切下一件）
-  $('#btnSaveCloth').onclick = () => {
+  $('#btnSaveCloth').onclick = async () => {
     const name = $('#clothName').value.trim();
     if (!name) { toast('给衣物起个名字吧'); return; }
     const cat = chipState($('#catChips'))[0] || 'top';
@@ -2075,6 +2147,8 @@ function init() {
     const seasons = chipState($('#seasonChips'));
     const styles = chipState($('#styleChips'));
     const thick = Number(chipState($('#thickChips'))[0] || 2);
+    // 保存前瘦身：大 PNG 抠图平铺成白底 JPEG，控制本地存储体积
+    if (pendingImage) pendingImage = await flattenImage(pendingImage);
     const list = Store.clothes();
 
     let cloth;
@@ -2175,7 +2249,7 @@ function init() {
       const entry = state.diary.find(d => d.date === diaryEditDate);
       if (!entry) { $('#outfitModal').classList.remove('open'); return; }
       const items = state.clothes.filter(c => outfitPicks.has(c.id))
-        .map(c => ({ id: c.id, name: c.name, cat: c.cat, image: c.image, why: '手动调整' }));
+        .map(c => ({ id: c.id, name: c.name, cat: c.cat, why: '手动调整' }));
       adjustWearStats(entry.items, items, diaryEditDate);
       entry.items = items;
       Store.saveDiary(state.diary);
@@ -2191,7 +2265,7 @@ function init() {
       if (outfitPicks.size < 2) { toast('至少选 2 件组成一套'); return; }
       const weather = weatherForTarget() || { condition: '晴', temperature: 20, feelsLike: 20 };
       const items = state.clothes.filter(c => outfitPicks.has(c.id))
-        .map(c => ({ id: c.id, name: c.name, cat: c.cat, image: c.image, why: '自己挑的' }));
+        .map(c => ({ id: c.id, name: c.name, cat: c.cat, why: '自己挑的' }));
       const isTomorrow = state.targetDay === 'tomorrow';
       recordOutfit(items, weather, state.goal);
       $('#outfitModal').classList.remove('open');
@@ -2204,7 +2278,7 @@ function init() {
     if (outfitPicks.size < 2) { toast('至少选 2 件组成一套'); return; }
     const name = $('#outfitName').value.trim() || ('我的搭配 ' + (state.outfits.length + 1));
     const items = state.clothes.filter(c => outfitPicks.has(c.id))
-      .map(c => ({ id: c.id, name: c.name, cat: c.cat, image: c.image }));
+      .map(c => ({ id: c.id, name: c.name, cat: c.cat }));
     state.outfits.unshift({ id: Date.now(), name, items, createdAt: Date.now(), useCount: 0, lastUsed: '' });
     Store.saveOutfits(state.outfits);
     $('#outfitModal').classList.remove('open');

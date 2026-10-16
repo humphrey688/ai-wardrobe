@@ -162,7 +162,7 @@ body{
   border:2px solid var(--line);border-radius:12px;background:#fafbfd;
   cursor:pointer;overflow:hidden;transition:.15s;padding:4px;
 }
-.pick-grid .pick-item img{width:100%;aspect-ratio:1;object-fit:contain;background:#f2f3f6;border-radius:8px}
+.pick-grid .pick-item img{width:100%;aspect-ratio:1;object-fit:contain;background:#fff;border-radius:8px}
 .pick-grid .pick-item p{font-size:10px;text-align:center;padding:3px 2px;color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pick-grid .pick-item.picked{border-color:var(--primary);background:var(--primary-soft)}
 .pick-grid .pick-item.picked p{color:var(--primary);font-weight:600}
@@ -220,7 +220,7 @@ body{
 }
 .cloth-card:active{transform:scale(.95)}
 .cloth-img{
-  aspect-ratio:1;background:#f2f3f6;
+  aspect-ratio:1;background:#fff;
   display:flex;align-items:center;justify-content:center;overflow:hidden;
 }
 .cloth-img img{width:100%;height:100%;object-fit:contain;padding:8px}
