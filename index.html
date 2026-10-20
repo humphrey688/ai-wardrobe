@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#f6f7f9">
 <title>AI 衣柜 · 天气穿搭助手</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%234fc3a1'/%3E%3Ctext x='50' y='68' font-size='52' text-anchor='middle' fill='white' font-family='sans-serif' font-weight='bold'%3E%E8%A1%A3%3C/text%3E%3C/svg%3E">
-  <link rel="stylesheet" href="style.css?v=20261020120412">
+  <link rel="stylesheet" href="style.css?v=20261020131327">
 <link rel="manifest" href="manifest.webmanifest">
 </head>
 <body>
@@ -178,7 +178,7 @@
 
       <div class="section-title">云端同步（GitHub）</div>
       <div class="card">
-        <div class="field-note">一键把衣物、日记、设置备份到你的 GitHub 仓库（humphrey688/ai-wardrobe），换手机/重装后一键恢复。注意：仓库是公开的（Pages 需要），衣物图片会上传，介意隐私的照片请勿上传。Token 只保存在本机浏览器。</div>
+        <div class="field-note">把衣物、日记、设置备份到你的 GitHub 仓库，换手机/重装后填上 Token 自动恢复。🔒 衣柜为私密模式：只有填了 Token 的设备能看到云端衣服，别人打开是空衣柜，自己录自己的。Token 只保存在本机浏览器。</div>
         <div class="field">
           <label>GitHub Token</label>
           <input type="password" id="syncTokenInput" placeholder="ghp_ 或 github_pat_ 开头（需仓库写入权限）" autocomplete="off">
@@ -351,6 +351,6 @@
   <input type="file" id="importFile" accept="application/json" hidden>
 
 </div>
-<script src="app.js?v=20261020120412"></script>
+<script src="app.js?v=20261020131327"></script>
 </body>
 </html>

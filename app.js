@@ -1862,11 +1862,13 @@ async function fetchCloudDataPublic() {
   finally { clearTimeout(timer); }
 }
 
-/* 打开页面时检查云端更新：
- * - 本地为空 + 云端有数据 → 自动载入（访客/新设备，打开就是最新的）
- * - 本地有数据 + 云端更新 → 首页提示条，一键载入
+/* 打开页面时检查云端更新（私密模式：只有填了 Token 的设备可访问云端衣柜）
+ * - 没 Token（访客）→ 完全不碰云端，打开就是空衣柜，自己录自己的
+ * - 有 Token + 本地为空（换新手机/重装）→ 自动载入云端衣柜
+ * - 有 Token + 云端有更新 → 首页提示条，一键载入
  */
 async function checkCloudUpdate() {
+  if (!getSyncToken()) return; // 访客模式：不拉取、不提示，云端衣服对无 Token 设备不可见
   const data = await fetchCloudDataPublic();
   if (!data) return; // 无云端数据或网络失败：静默，不影响本地使用
   const localEmpty = state.clothes.length === 0 && state.diary.length === 0;
@@ -1874,9 +1876,9 @@ async function checkCloudUpdate() {
   const cloudNewer = !meta.lastSyncAt || (data.syncedAt && data.syncedAt > meta.lastSyncAt);
 
   if (localEmpty) {
-    // 访客或新设备：自动载入云端衣柜
+    // 新设备/重装：自动载入云端衣柜
     const stats = await applyCloudPayload(data);
-    renderCloudBar('loaded', `☁ 已载入共享衣柜：${stats.count} 件衣物 · ${stats.outfitCount} 套搭配（备份于 ${new Date(data.syncedAt).toLocaleString('zh-CN')}）`);
+    renderCloudBar('loaded', `☁ 已载入云端衣柜：${stats.count} 件衣物 · ${stats.outfitCount} 套搭配（备份于 ${new Date(data.syncedAt).toLocaleString('zh-CN')}）`);
     toast('已同步云端衣柜 ✓');
     return;
   }
