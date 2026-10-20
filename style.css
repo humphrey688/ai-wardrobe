@@ -210,6 +210,11 @@ body{
   color:var(--primary);font-weight:600;
 }
 .wardrobe-tabs{margin-bottom:14px}
+/* 收纳位置筛选（更紧凑的 chips） */
+.box-filter{margin-top:-6px;margin-bottom:14px}
+.box-filter .chip{padding:5px 10px;font-size:11px;border-radius:10px}
+/* 卡片收纳位置徽标 */
+.cloth-box{font-size:10px;font-weight:600;color:var(--primary);margin-top:3px}
 
 /* ============ 衣柜 ============ */
 .cloth-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}

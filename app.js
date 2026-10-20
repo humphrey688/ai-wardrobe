@@ -104,7 +104,7 @@ const Store = {
 
 let state = {
   clothes: [], diary: [], outfits: [], settings: null,
-  goal: '日常', wardrobeTab: 'all', outfitView: 'saved',
+  goal: '日常', wardrobeTab: 'all', wardrobeBox: 'all', outfitView: 'saved',
   targetDay: 'tomorrow',  // 默认为明天搭配（今晚选好明天的衣服）
   weather: null,          // { today, tomorrow }
 };
@@ -1171,13 +1171,24 @@ function refreshReco() {
 
 /* ================= 渲染：衣柜 ================= */
 function renderWardrobe() {
+  renderBoxFilter();
   const grid = $('#clothGrid');
   const tab = state.wardrobeTab;
   const list = state.clothes
-    .filter(c => tab === 'all' || c.cat === tab)
+    .filter(c => (tab === 'all' || c.cat === tab) && (state.wardrobeBox === 'all' || c.box === state.wardrobeBox))
     .slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
-  $('#wardrobeEmpty').style.display = state.clothes.length ? 'none' : 'block';
+  // 空状态：完全没衣物 vs 筛选不到（某个位置/类别里没有）
+  const emptyEl = $('#wardrobeEmpty');
+  if (!state.clothes.length) {
+    emptyEl.style.display = 'block';
+    emptyEl.innerHTML = '<div class="empty-icon">🧺</div><p>衣柜还是空的</p><p class="empty-sub">点击「添加衣物」，把衣服拍进来<br>之后就能每天自动帮你搭配啦</p>';
+  } else if (!list.length) {
+    emptyEl.style.display = 'block';
+    emptyEl.innerHTML = '<div class="empty-icon">📦</div><p>这个筛选下还没有衣物</p><p class="empty-sub">换个位置或类别看看，或编辑衣物补上收纳位置</p>';
+  } else {
+    emptyEl.style.display = 'none';
+  }
   grid.style.display = list.length ? 'grid' : 'none';
 
   grid.innerHTML = list.map(c => `
@@ -1188,6 +1199,7 @@ function renderWardrobe() {
       <div class="cloth-info">
         <div class="cloth-name">${esc(c.name)}</div>
         <div class="cloth-tags">${CAT_NAMES[c.cat] || ''} · ${c.color || ''}${c.seasons ? ' · ' + c.seasons.join('') : ''}</div>
+        ${c.box ? `<div class="cloth-box">${boxIcon(c.box)} ${esc(c.box)}</div>` : ''}
         ${c.wearCount ? `<div class="cloth-worn">已穿 ${c.wearCount} 次</div>` : ''}
       </div>
     </div>`).join('');
@@ -1213,6 +1225,7 @@ function applyRecognition(cls, color) {
     setChips($('#catChips'), null, false, [cls.cat]);
     setChips($('#thickChips'), null, false, [String(cls.thick)]);
     setChips($('#seasonChips'), null, true, cls.seasons);
+    updateBoxChips(cls.cat, null); // 识别到鞋 → 位置选项切换为 地上/袋子里面
   }
   if (color) setChips($('#colorChips'), null, false, [color]);
 }
@@ -1232,6 +1245,7 @@ function showQueueItem(i) {
   pendingImage = it.image;
   renderPhotoPreview(pendingImage);
   applyRecognition(it.cls, it.color);
+  updateBoxChips(chipState($('#catChips'))[0] || 'top', null); // 每件队列重置收纳位置
   $('#clothName').value = suggestName(it.cls, it.color);
 
   const st = $('#cutStatus');
@@ -1249,7 +1263,7 @@ function showQueueItem(i) {
 function setChips(container, selected, multi, preselect) {
   const chps = container.querySelectorAll('.chip');
   chps.forEach(ch => {
-    const val = ch.dataset.cat || ch.dataset.season || ch.dataset.style || ch.dataset.color || ch.dataset.thick;
+    const val = ch.dataset.cat || ch.dataset.season || ch.dataset.style || ch.dataset.color || ch.dataset.thick || ch.dataset.box;
     let on = false;
     if (multi) {
       const arr = preselect || [];
@@ -1264,7 +1278,44 @@ function setChips(container, selected, multi, preselect) {
 
 function chipState(container) {
   return [...container.querySelectorAll('.chip.active')].map(ch =>
-    ch.dataset.cat || ch.dataset.season || ch.dataset.style || ch.dataset.color || ch.dataset.thick);
+    ch.dataset.cat || ch.dataset.season || ch.dataset.style || ch.dataset.color || ch.dataset.thick || ch.dataset.box);
+}
+
+/* ================= 收纳位置 ================= */
+/* 衣服四个箱：上箱、下箱、椅子箱、大行李箱；鞋只有：地上、袋子里面 */
+const BOX_OPTIONS = {
+  cloth: [
+    { k: '上箱子', icon: '📦' },
+    { k: '下箱子', icon: '📦' },
+    { k: '椅子箱子', icon: '📦' },
+    { k: '大行李箱', icon: '🧳' },
+  ],
+  shoes: [
+    { k: '地上', icon: '🏠' },
+    { k: '袋子里面', icon: '🛍️' },
+  ],
+};
+function boxIcon(k) {
+  const f = [...BOX_OPTIONS.cloth, ...BOX_OPTIONS.shoes].find(o => o.k === k);
+  return f ? f.icon : '📦';
+}
+/* 按类别渲染收纳位置选项；keepBox 是当前选择（换类别后失效则用默认值） */
+function updateBoxChips(cat, keepBox) {
+  const opts = cat === 'shoes' ? BOX_OPTIONS.shoes : BOX_OPTIONS.cloth;
+  const valid = opts.some(o => o.k === keepBox);
+  const sel = valid ? keepBox : (cat === 'shoes' ? '地上' : '上箱子');
+  $('#boxChips').innerHTML = opts.map(o =>
+    `<button class="chip ${o.k === sel ? 'active' : ''}" data-box="${o.k}">${o.icon} ${o.k}</button>`).join('');
+}
+/* 衣柜页收纳位置筛选（带每处件数，点一下看这个位置里有什么） */
+function renderBoxFilter() {
+  const counts = {};
+  state.clothes.forEach(c => { if (c.box) counts[c.box] = (counts[c.box] || 0) + 1; });
+  const opts = [...BOX_OPTIONS.cloth, ...BOX_OPTIONS.shoes];
+  $('#boxFilterChips').innerHTML = [
+    `<button class="chip ${state.wardrobeBox === 'all' ? 'active' : ''}" data-boxf="all">全部位置 ${state.clothes.length}</button>`,
+    ...opts.map(o => `<button class="chip ${state.wardrobeBox === o.k ? 'active' : ''}" data-boxf="${o.k}">${o.icon} ${o.k}${counts[o.k] ? ' ' + counts[o.k] : ''}</button>`),
+  ].join('');
 }
 
 function renderPhotoPreview(dataUrl) {
@@ -1289,6 +1340,7 @@ function openClothModal(item) {
   $('#btnRetryAI').style.display = 'none';
   $('#aiProgressWrap').style.display = 'none';
   setChips($('#catChips'), null, false, [item ? item.cat : 'top']);
+  updateBoxChips(item ? item.cat : 'top', item ? item.box : null);
   setChips($('#colorChips'), null, false, [item ? item.color : '白']);
   setChips($('#seasonChips'), null, true, item ? item.seasons : ['春', '夏', '秋', '冬']);
   setChips($('#styleChips'), null, true, item ? item.styles : []);
@@ -2112,11 +2164,18 @@ async function init() {
     }
   }
 
-  // 弹窗交互（单选：类别/颜色/厚薄；多选：季节/风格）
+  // 弹窗交互（单选：类别/颜色/厚薄/收纳位置；多选：季节/风格）
   $('#catChips').addEventListener('click', ev => {
     const ch = ev.target.closest('.chip');
     if (!ch) return;
     $$('#catChips .chip').forEach(c => c.classList.remove('active'));
+    ch.classList.add('active');
+    updateBoxChips(ch.dataset.cat, chipState($('#boxChips'))[0]); // 换类别 → 收纳位置选项跟着切
+  });
+  $('#boxChips').addEventListener('click', ev => {
+    const ch = ev.target.closest('.chip');
+    if (!ch) return;
+    $$('#boxChips .chip').forEach(c => c.classList.remove('active'));
     ch.classList.add('active');
   });
   $('#colorChips').addEventListener('click', ev => {
@@ -2143,6 +2202,7 @@ async function init() {
     const name = $('#clothName').value.trim();
     if (!name) { toast('给衣物起个名字吧'); return; }
     const cat = chipState($('#catChips'))[0] || 'top';
+    const box = chipState($('#boxChips'))[0] || (cat === 'shoes' ? '地上' : '上箱子');
     const color = chipState($('#colorChips'))[0] || '多色';
     const seasons = chipState($('#seasonChips'));
     const styles = chipState($('#styleChips'));
@@ -2156,13 +2216,13 @@ async function init() {
       const idx = list.findIndex(c => c.id === editingId);
       if (idx >= 0) {
         cloth = Object.assign({}, list[idx], {
-          name, cat, color, seasons, styles, thick, image: pendingImage,
+          name, cat, color, seasons, styles, thick, box, image: pendingImage,
         });
         list[idx] = cloth;
       }
     }
     if (!cloth) {
-      cloth = { id: Date.now(), name, cat, color, seasons, styles, thick, image: pendingImage, createdAt: Date.now(), wearCount: 0, lastWorn: '' };
+      cloth = { id: Date.now(), name, cat, color, seasons, styles, thick, box, image: pendingImage, createdAt: Date.now(), wearCount: 0, lastWorn: '' };
       list.unshift(cloth);
     }
     Store.saveClothes(list);
@@ -2217,6 +2277,14 @@ async function init() {
     $$('#wardrobeTabs .chip').forEach(c => c.classList.remove('active'));
     ch.classList.add('active');
     state.wardrobeTab = ch.dataset.cat;
+    renderWardrobe();
+  });
+
+  // 衣柜收纳位置筛选（动态 chips，事件委托）
+  $('#boxFilterChips').addEventListener('click', ev => {
+    const ch = ev.target.closest('.chip');
+    if (!ch) return;
+    state.wardrobeBox = ch.dataset.boxf;
     renderWardrobe();
   });
 
