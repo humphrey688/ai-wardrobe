@@ -963,6 +963,11 @@ function scoreItem(item, profile, goal, weather, settings, rand) {
     score -= 6; reasons.push('今天刚穿过');
   }
 
+  // 没洗的降权（洗完再穿；衣柜全没洗时仍能出方案，只是都会提示）
+  if (item.washed === false) {
+    score -= 15; reasons.push('没洗，先洗再穿');
+  }
+
   // 轻微随机扰动（同一天稳定，第二天自然变化）
   score += Math.floor(rand() * 6) - 3;
   return { score, reasons };
@@ -1100,7 +1105,7 @@ function renderRecommendation(weather) {
         ${it.c.image ? `<img src="${it.c.image}" alt="">` : '<img src="" alt="" style="visibility:hidden">'}
         <div class="oi-info">
           <div class="oi-cat">${it.role}</div>
-          <div class="oi-name">${esc(it.c.name)}</div>
+          <div class="oi-name">${esc(it.c.name)}${it.c.washed === false ? '<span class="wash-flag">🧺 没洗</span>' : ''}</div>
           <div class="oi-why">${esc(it.why)}</div>
         </div>
       </div>`;
@@ -1175,7 +1180,7 @@ function renderWardrobe() {
   const grid = $('#clothGrid');
   const tab = state.wardrobeTab;
   const list = state.clothes
-    .filter(c => (tab === 'all' || c.cat === tab) && (state.wardrobeBox === 'all' || c.box === state.wardrobeBox))
+    .filter(c => (tab === 'all' || c.cat === tab) && (state.wardrobeBox === 'all' || (state.wardrobeBox === '__unwashed' ? c.washed === false : c.box === state.wardrobeBox)))
     .slice().sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
   // 空状态：完全没衣物 vs 筛选不到（某个位置/类别里没有）
@@ -1200,6 +1205,7 @@ function renderWardrobe() {
         <div class="cloth-name">${esc(c.name)}</div>
         <div class="cloth-tags">${CAT_NAMES[c.cat] || ''} · ${c.color || ''}${c.seasons ? ' · ' + c.seasons.join('') : ''}</div>
         ${c.box ? `<div class="cloth-box">${boxIcon(c.box)} ${esc(c.box)}</div>` : ''}
+        ${c.washed === false ? `<button class="cloth-wash" data-washtoggle="${c.id}">🧺 没洗 · 洗完点此标已洗</button>` : ''}
         ${c.wearCount ? `<div class="cloth-worn">已穿 ${c.wearCount} 次</div>` : ''}
       </div>
     </div>`).join('');
@@ -1208,6 +1214,17 @@ function renderWardrobe() {
     card.onclick = () => {
       const item = state.clothes.find(c => c.id === Number(card.dataset.id));
       if (item) openClothModal(item);
+    };
+  });
+  // 没洗 → 洗完一键标已洗（不弹编辑窗）
+  $$('#clothGrid [data-washtoggle]').forEach(btn => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const id = Number(btn.dataset.washtoggle);
+      state.clothes = state.clothes.map(c => c.id === id ? Object.assign({}, c, { washed: true }) : c);
+      Store.saveClothes(state.clothes);
+      renderWardrobe();
+      toast('已标记为已洗 ✓');
     };
   });
 }
@@ -1246,6 +1263,7 @@ function showQueueItem(i) {
   renderPhotoPreview(pendingImage);
   applyRecognition(it.cls, it.color);
   updateBoxChips(chipState($('#catChips'))[0] || 'top', null); // 每件队列重置收纳位置
+  setChips($('#washChips'), null, false, ['1']); // 每件队列重置清洗状态为已洗
   $('#clothName').value = suggestName(it.cls, it.color);
 
   const st = $('#cutStatus');
@@ -1263,7 +1281,7 @@ function showQueueItem(i) {
 function setChips(container, selected, multi, preselect) {
   const chps = container.querySelectorAll('.chip');
   chps.forEach(ch => {
-    const val = ch.dataset.cat || ch.dataset.season || ch.dataset.style || ch.dataset.color || ch.dataset.thick || ch.dataset.box;
+    const val = ch.dataset.cat || ch.dataset.season || ch.dataset.style || ch.dataset.color || ch.dataset.thick || ch.dataset.box || ch.dataset.wash;
     let on = false;
     if (multi) {
       const arr = preselect || [];
@@ -1278,7 +1296,7 @@ function setChips(container, selected, multi, preselect) {
 
 function chipState(container) {
   return [...container.querySelectorAll('.chip.active')].map(ch =>
-    ch.dataset.cat || ch.dataset.season || ch.dataset.style || ch.dataset.color || ch.dataset.thick || ch.dataset.box);
+    ch.dataset.cat || ch.dataset.season || ch.dataset.style || ch.dataset.color || ch.dataset.thick || ch.dataset.box || ch.dataset.wash);
 }
 
 /* ================= 收纳位置 ================= */
@@ -1314,9 +1332,11 @@ function renderBoxFilter() {
   const counts = {};
   state.clothes.forEach(c => { if (c.box) counts[c.box] = (counts[c.box] || 0) + 1; });
   const opts = [...BOX_OPTIONS.cloth, ...BOX_OPTIONS.shoes].filter((o, i, arr) => arr.findIndex(x => x.k === o.k) === i); // 衣服/鞋共用的位置去重（洗衣机）
+  const unwashedN = state.clothes.filter(c => c.washed === false).length;
   $('#boxFilterChips').innerHTML = [
     `<button class="chip ${state.wardrobeBox === 'all' ? 'active' : ''}" data-boxf="all">全部位置 ${state.clothes.length}</button>`,
     ...opts.map(o => `<button class="chip ${state.wardrobeBox === o.k ? 'active' : ''}" data-boxf="${o.k}">${o.icon} ${o.k}${counts[o.k] ? ' ' + counts[o.k] : ''}</button>`),
+    `<button class="chip ${state.wardrobeBox === '__unwashed' ? 'active' : ''}" data-boxf="__unwashed">🧺 没洗 ${unwashedN}</button>`,
   ].join('');
 }
 
@@ -1343,6 +1363,7 @@ function openClothModal(item) {
   $('#aiProgressWrap').style.display = 'none';
   setChips($('#catChips'), null, false, [item ? item.cat : 'top']);
   updateBoxChips(item ? item.cat : 'top', item ? item.box : null);
+  setChips($('#washChips'), null, false, [item ? (item.washed === false ? '0' : '1') : '1']);
   setChips($('#colorChips'), null, false, [item ? item.color : '白']);
   setChips($('#seasonChips'), null, true, item ? item.seasons : ['春', '夏', '秋', '冬']);
   setChips($('#styleChips'), null, true, item ? item.styles : []);
@@ -2180,6 +2201,12 @@ async function init() {
     $$('#boxChips .chip').forEach(c => c.classList.remove('active'));
     ch.classList.add('active');
   });
+  $('#washChips').addEventListener('click', ev => {
+    const ch = ev.target.closest('.chip');
+    if (!ch) return;
+    $$('#washChips .chip').forEach(c => c.classList.remove('active'));
+    ch.classList.add('active');
+  });
   $('#colorChips').addEventListener('click', ev => {
     const ch = ev.target.closest('.chip');
     if (!ch) return;
@@ -2205,6 +2232,7 @@ async function init() {
     if (!name) { toast('给衣物起个名字吧'); return; }
     const cat = chipState($('#catChips'))[0] || 'top';
     const box = chipState($('#boxChips'))[0] || (cat === 'shoes' ? '地上' : '上箱子');
+    const washed = chipState($('#washChips'))[0] !== '0'; // 没选或选已洗都算已洗
     const color = chipState($('#colorChips'))[0] || '多色';
     const seasons = chipState($('#seasonChips'));
     const styles = chipState($('#styleChips'));
@@ -2218,13 +2246,13 @@ async function init() {
       const idx = list.findIndex(c => c.id === editingId);
       if (idx >= 0) {
         cloth = Object.assign({}, list[idx], {
-          name, cat, color, seasons, styles, thick, box, image: pendingImage,
+          name, cat, color, seasons, styles, thick, box, washed, image: pendingImage,
         });
         list[idx] = cloth;
       }
     }
     if (!cloth) {
-      cloth = { id: Date.now(), name, cat, color, seasons, styles, thick, box, image: pendingImage, createdAt: Date.now(), wearCount: 0, lastWorn: '' };
+      cloth = { id: Date.now(), name, cat, color, seasons, styles, thick, box, washed, image: pendingImage, createdAt: Date.now(), wearCount: 0, lastWorn: '' };
       list.unshift(cloth);
     }
     Store.saveClothes(list);

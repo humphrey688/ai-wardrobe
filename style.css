@@ -215,6 +215,15 @@ body{
 .box-filter .chip{padding:5px 10px;font-size:11px;border-radius:10px}
 /* 卡片收纳位置徽标 */
 .cloth-box{font-size:10px;font-weight:600;color:var(--primary);margin-top:3px}
+/* 没洗标记（卡片上橙色，洗完点一下直接标"已洗"） */
+.cloth-wash{
+  margin-top:5px;font-size:10px;font-weight:600;color:#b06a1e;
+  background:#fdf3e4;border:1px solid #f0dcbc;border-radius:8px;
+  padding:4px 8px;cursor:pointer;width:100%;text-align:left;
+}
+.cloth-wash:active{transform:scale(.95)}
+/* 推荐方案里没洗的小旗标 */
+.wash-flag{font-size:10px;color:#b06a1e;background:#fdf3e4;border-radius:6px;padding:1px 6px;margin-left:4px;font-weight:600;white-space:nowrap}
 
 /* ============ 衣柜 ============ */
 .cloth-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
