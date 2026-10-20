@@ -1289,10 +1289,12 @@ const BOX_OPTIONS = {
     { k: '下箱子', icon: '📦' },
     { k: '椅子箱子', icon: '📦' },
     { k: '大行李箱', icon: '🧳' },
+    { k: '洗衣机里面', icon: '🌀' },
   ],
   shoes: [
     { k: '地上', icon: '🏠' },
     { k: '袋子里面', icon: '🛍️' },
+    { k: '洗衣机里面', icon: '🌀' },
   ],
 };
 function boxIcon(k) {
@@ -1311,7 +1313,7 @@ function updateBoxChips(cat, keepBox) {
 function renderBoxFilter() {
   const counts = {};
   state.clothes.forEach(c => { if (c.box) counts[c.box] = (counts[c.box] || 0) + 1; });
-  const opts = [...BOX_OPTIONS.cloth, ...BOX_OPTIONS.shoes];
+  const opts = [...BOX_OPTIONS.cloth, ...BOX_OPTIONS.shoes].filter((o, i, arr) => arr.findIndex(x => x.k === o.k) === i); // 衣服/鞋共用的位置去重（洗衣机）
   $('#boxFilterChips').innerHTML = [
     `<button class="chip ${state.wardrobeBox === 'all' ? 'active' : ''}" data-boxf="all">全部位置 ${state.clothes.length}</button>`,
     ...opts.map(o => `<button class="chip ${state.wardrobeBox === o.k ? 'active' : ''}" data-boxf="${o.k}">${o.icon} ${o.k}${counts[o.k] ? ' ' + counts[o.k] : ''}</button>`),
