@@ -968,6 +968,11 @@ function scoreItem(item, profile, goal, weather, settings, rand) {
     score -= 15; reasons.push('没洗，先洗再穿');
   }
 
+  // 晾着的降权（还湿着没收，晾干收好再穿）
+  if (item.box === '晾着') {
+    score -= 15; reasons.push('晾着还没收');
+  }
+
   // 轻微随机扰动（同一天稳定，第二天自然变化）
   score += Math.floor(rand() * 6) - 3;
   return { score, reasons };
@@ -1105,7 +1110,7 @@ function renderRecommendation(weather) {
         ${it.c.image ? `<img src="${it.c.image}" alt="">` : '<img src="" alt="" style="visibility:hidden">'}
         <div class="oi-info">
           <div class="oi-cat">${it.role}</div>
-          <div class="oi-name">${esc(it.c.name)}${it.c.washed === false ? '<span class="wash-flag">🧺 没洗</span>' : ''}</div>
+          <div class="oi-name">${esc(it.c.name)}${it.c.washed === false ? '<span class="wash-flag">🧺 没洗</span>' : ''}${it.c.box === '晾着' ? '<span class="wash-flag dry">🌤️ 晾着</span>' : ''}</div>
           <div class="oi-why">${esc(it.why)}</div>
         </div>
       </div>`;
@@ -1205,6 +1210,7 @@ function renderWardrobe() {
         <div class="cloth-name">${esc(c.name)}</div>
         <div class="cloth-tags">${CAT_NAMES[c.cat] || ''} · ${c.color || ''}${c.seasons ? ' · ' + c.seasons.join('') : ''}</div>
         ${c.box ? `<div class="cloth-box">${boxIcon(c.box)} ${esc(c.box)}</div>` : ''}
+        ${c.box === '晾着' ? `<button class="cloth-drying" data-drying="${c.id}">${dryingLabel(c)}</button>` : ''}
         ${c.washed === false ? `<button class="cloth-wash" data-washtoggle="${c.id}">🧺 没洗 · 洗完点此标已洗</button>` : ''}
         ${c.wearCount ? `<div class="cloth-worn">已穿 ${c.wearCount} 次</div>` : ''}
       </div>
@@ -1216,15 +1222,28 @@ function renderWardrobe() {
       if (item) openClothModal(item);
     };
   });
-  // 没洗 → 洗完一键标已洗（不弹编辑窗）
+  // 没洗 → 洗完一键标已洗；在洗衣机里的顺带变成「晾着」并记开始时间（不弹编辑窗）
   $$('#clothGrid [data-washtoggle]').forEach(btn => {
     btn.onclick = (ev) => {
       ev.stopPropagation();
       const id = Number(btn.dataset.washtoggle);
-      state.clothes = state.clothes.map(c => c.id === id ? Object.assign({}, c, { washed: true }) : c);
+      state.clothes = state.clothes.map(c => {
+        if (c.id !== id) return c;
+        const upd = Object.assign({}, c, { washed: true });
+        if (c.box === '洗衣机里面') { upd.box = '晾着'; upd.dryingSince = Date.now(); }
+        return upd;
+      });
       Store.saveClothes(state.clothes);
       renderWardrobe();
-      toast('已标记为已洗 ✓');
+      toast('已洗 ✓ 顺手挂起来晾着了');
+    };
+  });
+  // 晾着标签：点一下打开编辑窗改收纳位置（晾干收进箱子）
+  $$('#clothGrid [data-drying]').forEach(btn => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const item = state.clothes.find(c => c.id === Number(btn.dataset.drying));
+      if (item) openClothModal(item);
     };
   });
 }
@@ -1308,13 +1327,27 @@ const BOX_OPTIONS = {
     { k: '椅子箱子', icon: '📦' },
     { k: '大行李箱', icon: '🧳' },
     { k: '洗衣机里面', icon: '🌀' },
+    { k: '晾着', icon: '🌤️' },
   ],
   shoes: [
     { k: '地上', icon: '🏠' },
     { k: '袋子里面', icon: '🛍️' },
     { k: '洗衣机里面', icon: '🌀' },
+    { k: '晾着', icon: '🌤️' },
   ],
 };
+/* 晾了几天（今天晾的显示 0 天） */
+function dryingDays(c) {
+  if (!c.dryingSince) return 0;
+  return Math.floor((Date.now() - c.dryingSince) / 86400000);
+}
+/* 卡片上的晾晒标签文案 */
+function dryingLabel(c) {
+  const d = dryingDays(c);
+  if (d <= 0) return '🌤️ 晾着 · 今天刚晾的';
+  if (d >= 3) return `🌤️ 晾了 ${d} 天，该收啦`;
+  return `🌤️ 晾着 · 已晾 ${d} 天`;
+}
 function boxIcon(k) {
   const f = [...BOX_OPTIONS.cloth, ...BOX_OPTIONS.shoes].find(o => o.k === k);
   return f ? f.icon : '📦';
@@ -1675,7 +1708,7 @@ function importData(file) {
 }
 
 /* ================= 云端同步（GitHub，离线优先 + 手动同步） ================= */
-const SYNC_REPO = 'humphrey688/ai-wardrobe';
+const SYNC_REPO = 'humphrey688/ai-wardrobe-data'; // 私有数据仓库：备份只有带 Token 能读写，网页代码在公开仓库 ai-wardrobe
 const SYNC_FILE = 'cloud-data.json';
 const SYNC_API = 'https://api.github.com';
 
@@ -1842,14 +1875,16 @@ async function applyCloudPayload(data) {
   return { count: clothes.length, diaryCount: diary.length, outfitCount: outfits.length };
 }
 
-/* 公开拉取云端数据（无需 Token，公开仓库可直接读；no-store 保证最新） */
+/* 拉取云端数据（私有仓库：必须带 Token 才能读；no-store 保证最新） */
 async function fetchCloudDataPublic() {
+  const token = getSyncToken();
+  if (!token) return null; // 无 Token = 访客，不碰云端
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 12000);
   try {
-    // 走 api.github.com（国内可用，参考 AP 店铺经验；不用会缓存陈旧数据的 CDN）
     const res = await fetch(`https://api.github.com/repos/${SYNC_REPO}/contents/${SYNC_FILE}?ref=main`, {
-      headers: { Accept: 'application/vnd.github+json' }, signal: ctrl.signal,
+      headers: { Accept: 'application/vnd.github+json', Authorization: 'Bearer ' + token },
+      signal: ctrl.signal,
       cache: 'no-store', // 关键：绕过 HTTP 缓存，保证拿到最新备份
     });
     if (!res.ok) return null; // 限流/无数据：静默降级，不影响本地使用
@@ -2250,11 +2285,15 @@ async function init() {
         cloth = Object.assign({}, list[idx], {
           name, cat, color, seasons, styles, thick, box, washed, image: pendingImage,
         });
+        // 晾晒时间维护：新晾着打时间戳；从晾着收进箱子清掉
+        if (box === '晾着' && list[idx].box !== '晾着') cloth.dryingSince = Date.now();
+        else if (box !== '晾着' && list[idx].box === '晾着') delete cloth.dryingSince;
         list[idx] = cloth;
       }
     }
     if (!cloth) {
       cloth = { id: Date.now(), name, cat, color, seasons, styles, thick, box, washed, image: pendingImage, createdAt: Date.now(), wearCount: 0, lastWorn: '' };
+      if (box === '晾着') cloth.dryingSince = Date.now(); // 手动直接选「晾着」也算今天开始晾
       list.unshift(cloth);
     }
     Store.saveClothes(list);

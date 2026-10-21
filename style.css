@@ -222,8 +222,16 @@ body{
   padding:4px 8px;cursor:pointer;width:100%;text-align:left;
 }
 .cloth-wash:active{transform:scale(.95)}
+/* 晾着标记（卡片上蓝色，显示晾了几天，点击进编辑收衣服） */
+.cloth-drying{
+  margin-top:5px;font-size:10px;font-weight:600;color:#3a6ea5;
+  background:#e9f2fb;border:1px solid #c5dbee;border-radius:8px;
+  padding:4px 8px;cursor:pointer;width:100%;text-align:left;
+}
+.cloth-drying:active{transform:scale(.95)}
 /* 推荐方案里没洗的小旗标 */
 .wash-flag{font-size:10px;color:#b06a1e;background:#fdf3e4;border-radius:6px;padding:1px 6px;margin-left:4px;font-weight:600;white-space:nowrap}
+.wash-flag.dry{color:#3a6ea5;background:#e9f2fb}
 
 /* ============ 衣柜 ============ */
 .cloth-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
